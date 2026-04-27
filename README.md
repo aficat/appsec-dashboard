@@ -7,6 +7,8 @@ This folder implements a repeatable **AI-powered AppSec workflow**: analyze an o
 - **Default target repo**: [haiwen/seafile](https://github.com/haiwen/seafile) (C-heavy with some Python)
 - **Default clone location**: `repo/`
 
+![Dashboard screenshot](dashboard/screenshot.png)
+
 ## Running the SAST demo
 
 `deepagent_sast_demo.py` imports `tools/` as a top-level package, so run it with this repo root on `PYTHONPATH` (or run from this directory).
@@ -29,6 +31,12 @@ cp .env.example .env
 ```
 
 Then edit `.env` as needed (scripts call `dotenv.load_dotenv()` automatically; the repo ignores `.env` and `.venv/`).
+
+Recommended `.env` knobs:
+
+- **`BEDROCK_ALT_ANALYZER_MODEL_ID`**: set a fast non-Qwen alt model to keep Stage 3 quick (recommended: `amazon.nova-lite-v1:0`).
+- **`MIN_FINDINGS`**: minimum findings in the final report (default: `10`).
+- **`TARGET_FINDINGS`**: push the analyzer to aim higher than the minimum (example: `30`).
 
 Optional: run the dashboard UI:
 

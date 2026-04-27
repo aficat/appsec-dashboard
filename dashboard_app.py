@@ -645,7 +645,8 @@ def index():
     qwen_model = os.getenv("BEDROCK_QWEN_MODEL_ID", "qwen.qwen3-32b-v1:0").strip() or "qwen.qwen3-32b-v1:0"
     alt_default = (
         os.getenv("BEDROCK_ALT_MODEL_ID")
-        or os.getenv("BEDROCK_CLAUDE_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
+        or os.getenv("BEDROCK_CLAUDE_MODEL_ID")
+        or "amazon.nova-lite-v1:0"
         or qwen_model
     )
     alt_model = os.getenv("BEDROCK_ALT_ANALYZER_MODEL_ID", alt_default).strip() or alt_default

@@ -30,7 +30,11 @@ except ImportError:  # pragma: no cover
 load_dotenv()
 
 # Consistency/recall knobs (env-overridable)
-MIN_FINDINGS = int(os.getenv("MIN_FINDINGS", "8").strip() or "8")
+MIN_FINDINGS = int(os.getenv("MIN_FINDINGS", "10").strip() or "10")
+TARGET_FINDINGS = int(os.getenv("TARGET_FINDINGS", str(max(20, MIN_FINDINGS))).strip() or str(max(20, MIN_FINDINGS)))
+
+# Recall-first behavior: keep low-confidence findings (do not drop in evaluator/normalizer).
+RECALL_FIRST = str(os.getenv("RECALL_FIRST", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
 # Git repo setup
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -81,8 +85,10 @@ else:
 bedrock_qwen_model_id = os.getenv("BEDROCK_QWEN_MODEL_ID", "qwen.qwen3-32b-v1:0")
 # Optional second analyzer model (used in Stage 3 dual-flow).
 # Defaults to a *different* model than Qwen so Stage 3 is a real cross-model check.
-_alt_default = os.getenv("BEDROCK_ALT_MODEL_ID") or os.getenv(
-    "BEDROCK_CLAUDE_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0"
+_alt_default = (
+    os.getenv("BEDROCK_ALT_MODEL_ID")
+    or os.getenv("BEDROCK_CLAUDE_MODEL_ID")
+    or "amazon.nova-lite-v1:0"
 )
 bedrock_alt_analyzer_model_id = os.getenv("BEDROCK_ALT_ANALYZER_MODEL_ID", _alt_default)
 if (bedrock_alt_analyzer_model_id or "").strip() == (bedrock_qwen_model_id or "").strip():
@@ -441,6 +447,119 @@ def _stream_final_content(agent_obj, user_content: str) -> str:
     return final_text
 
 
+def _norm_severity(s: object) -> str:
+    v = str(s or "").strip().lower()
+    if v in {"critical", "crit", "p0", "sev0", "s0"}:
+        return "Critical"
+    if v in {"high", "sev1", "p1", "s1"}:
+        return "High"
+    if v in {"medium", "med", "moderate", "sev2", "p2", "s2"}:
+        return "Medium"
+    if v in {"low", "sev3", "p3", "s3", "informational", "info"}:
+        return "Low"
+    return ""
+
+
+def _classify_severity(f: dict) -> str:
+    """
+    Deterministic severity assignment (recall-first).
+    Ensures every finding has one of: Critical/High/Medium/Low.
+    """
+    # If the model already provided a valid severity, keep it.
+    existing = _norm_severity(f.get("severity"))
+    if existing:
+        return existing
+
+    title = str(f.get("title") or "").lower()
+    cat = str(f.get("category") or f.get("owasp") or "").lower()
+    desc = str(f.get("description") or "").lower()
+    impact = str(f.get("impact") or "").lower()
+    snippet = str(f.get("code_snippet") or f.get("evidence") or "").lower()
+    text = " ".join([title, cat, desc, impact, snippet])
+
+    def has_any(*words: str) -> bool:
+        return any(w in text for w in words if w)
+
+    # Critical: RCE / auth bypass / command injection / deserialization / memory corruption primitives.
+    if has_any(
+        "remote code execution",
+        "rce",
+        "auth bypass",
+        "authentication bypass",
+        "command injection",
+        "os command injection",
+        "shell injection",
+        "unsafe deserialization",
+        "deserialize",
+        "pickle.loads",
+        "yaml.load(",
+        "arbitrary code",
+        "buffer overflow",
+        "stack overflow",
+        "heap overflow",
+        "use-after-free",
+        "uaf",
+        "double free",
+        "format string",
+        "sql injection",
+        "sqli",
+        "ssrf",
+    ):
+        return "Critical"
+
+    # High: strong exploitation risk or sensitive data compromise patterns.
+    if has_any(
+        "path traversal",
+        "directory traversal",
+        "lfi",
+        "rfi",
+        "xxe",
+        "xss",
+        "cross-site scripting",
+        "csrf",
+        "open redirect",
+        "hardcoded secret",
+        "hard-coded secret",
+        "api key",
+        "private key",
+        "jwt secret",
+        "credential",
+        "password",
+        "token",
+        "session fixation",
+        "insecure session",
+        "broken access control",
+        "privilege escalation",
+    ):
+        return "High"
+
+    # Medium: weaker primitives / misconfig / missing validation with plausible impact.
+    if has_any(
+        "missing validation",
+        "input validation",
+        "insufficient validation",
+        "unsafe temp file",
+        "tmpfile",
+        "weak crypto",
+        "insecure random",
+        "predictable",
+        "information disclosure",
+        "leak",
+        "log injection",
+        "header injection",
+        "dos",
+        "denial of service",
+        "resource exhaustion",
+        "integer overflow",
+        "null dereference",
+        "race condition",
+    ):
+        return "Medium"
+
+    # Low: best-practice issues, hygiene, or uncertain impact.
+    return "Low"
+
+
 def _normalize_report_json_inplace(report: dict) -> None:
     """
     Enforce a minimum report schema so downstream markdown + dashboard rendering
@@ -484,6 +603,9 @@ def _normalize_report_json_inplace(report: dict) -> None:
         if not f.get("code_snippet") and isinstance(f.get("evidence"), str):
             f["code_snippet"] = f["evidence"]
 
+        # Severity: never allow "Unspecified" (force deterministic classification).
+        f["severity"] = _classify_severity(f)
+
         # Validation: evaluator may attach verdict + confidence. Ensure stable defaults so
         # downstream renderers can always show a column even for legacy/fast-mode outputs.
         vs = f.get("validation_status")
@@ -501,8 +623,8 @@ def _normalize_report_json_inplace(report: dict) -> None:
         }:
             f["validation_status"] = "Requires manual check"
         else:
-            # This pipeline intentionally avoids a "No" state; unclear/invalid items should be dropped
-            # by the evaluator. If they leak through, force manual review rather than a false negative.
+            # This pipeline intentionally avoids a "No" state; unclear/invalid items should be treated as
+            # manual review rather than a false negative. (Recall-first: we keep findings, even if low confidence.)
             f["validation_status"] = "Requires manual check"
         vc = f.get("validation_confidence")
         if not isinstance(vc, (int, float)) or isinstance(vc, bool):
@@ -661,7 +783,7 @@ Plan JSON:
             "- Ensure it is a valid JSON object.\n"
             "- Ensure required keys exist: summary/findings/recommendations.\n"
             "- Ensure each finding has required fields (MUST include a non-empty title) and plausible file+line.\n"
-            "- Remove hallucinated items not supported by evidence; if you drop items, add a note in summary.\n"
+            "- RECALL-FIRST: Do NOT drop findings. If evidence is missing/unclear, keep the finding but set validation_status='Requires manual check', lower validation_confidence, and explain why.\n"
             "- For each remaining finding, open the referenced file and confirm the code snippet exists.\n"
             "- If a snippet is missing but the underlying issue is present elsewhere nearby, correct the line/snippet.\n"
             "- IMPORTANT: Do NOT output any other validation_status values (no lowercase, no 'No').\n"
@@ -765,6 +887,7 @@ def build_multi_stage_chain():
                     "started_at": state.get("started_at"),
                 }
             )
+            print("[Stage 1/4] Repo reader complete (cached).")
             return {**state, "repo_map_json": cached}
 
         repo_reader_agent = create_deep_agent(
@@ -796,6 +919,7 @@ def build_multi_stage_chain():
                 "started_at": state.get("started_at"),
             }
         )
+        print("[Stage 1/4] Repo reader complete.")
 
         return {**state, "repo_map_json": repo_map_text}
 
@@ -846,6 +970,7 @@ Skills:
                 "started_at": state.get("started_at"),
             }
         )
+        print("[Stage 2/4] Skill runner complete.")
         return {**state, "analysis_plan_json": plan_text}
 
     def analysis_step(state: dict) -> dict:
@@ -882,7 +1007,7 @@ Skills:
                 "- Use filesystem tools (ls/glob/grep/read_file) to gather evidence.\n"
                 "- Report findings only when you have a concrete code snippet from a real file (via tools) that supports the claim.\n"
                 "- Breadth: execute every major checks entry from the analysis plan across multiple categories/paths.\n"
-                "- Minimum 3 findings in findings (non-empty array). If fewer are evidence-backed, add lower-severity defense-in-depth issues still supported by snippets, or explain why three is impossible in summary.review_note.\n"
+                f"- Minimum {TARGET_FINDINGS} distinct findings (non-empty array). If you cannot reach this, explain why in summary.review_note.\n"
                 "- Do not return an empty findings array after opening only one or two files; work through files_to_review/scope/search_terms."
             ),
         )
@@ -920,25 +1045,38 @@ Each finding must still have a verbatim `code_snippet` from `read_file`/`grep` o
             return (label, _stream_final_content(analysis_agent, analysis_user))
 
         reports: dict[str, str] = {}
+        errors: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=2) as ex:
             futs = {
                 ex.submit(_run_one, "qwen", llm_analyzer): "qwen",
                 ex.submit(_run_one, "alt", llm_analyzer_alt): "alt",
             }
             for fut in as_completed(futs):
-                label, txt = fut.result()
-                reports[label] = txt
+                label = futs[fut]
+                try:
+                    _label, txt = fut.result()
+                    reports[_label] = txt
+                except Exception as e:
+                    errors[label] = str(e)
+                    reports[label] = ""
+
+        if errors and reports.get("qwen"):
+            print(f"[Stage 3/4] Alt analyzer failed; continuing with Qwen only. ({errors.get('alt','')})")
+        elif errors and not reports.get("qwen"):
+            # Both failed; surface the first error.
+            raise RuntimeError(errors.get("qwen") or errors.get("alt") or "Analyzer failed")
 
         _write_run_status(
             {
                 "state": "running",
                 "stage": "Analyzer (done)",
                 "progress": 75,
-                "message": "Draft report complete.",
+                "message": "Draft report complete." + (" (alt failed; used qwen only)" if errors.get("alt") else ""),
                 "run_id": state.get("run_id"),
                 "started_at": state.get("started_at"),
             }
         )
+        print("[Stage 3/4] Analyzer complete.")
         return {
             **state,
             "report_json_qwen": reports.get("qwen", ""),
@@ -1006,11 +1144,14 @@ Report JSON:
             return (label, _stream_final_content(judge_agent, judge_user))
 
         final_texts: dict[str, str] = {}
+        report_qwen = state.get("report_json_qwen", "") or ""
+        report_alt = state.get("report_json_alt", "") or ""
         with ThreadPoolExecutor(max_workers=2) as ex:
-            futs = {
-                ex.submit(_eval_one, "qwen", state.get("report_json_qwen", "")): "qwen",
-                ex.submit(_eval_one, "alt", state.get("report_json_alt", "")): "alt",
-            }
+            futs = {}
+            if report_qwen.strip():
+                futs[ex.submit(_eval_one, "qwen", report_qwen)] = "qwen"
+            if report_alt.strip():
+                futs[ex.submit(_eval_one, "alt", report_alt)] = "alt"
             for fut in as_completed(futs):
                 label, txt = fut.result()
                 final_texts[label] = txt
@@ -1020,7 +1161,10 @@ Report JSON:
 
         obj_qwen = _extract_json_object(final_qwen) or _extract_json_object(state.get("report_json_qwen", ""))
         obj_alt = _extract_json_object(final_alt) or _extract_json_object(state.get("report_json_alt", ""))
-        similarity = _report_similarity(obj_qwen, obj_alt)
+        if obj_qwen and obj_alt:
+            similarity = _report_similarity(obj_qwen, obj_alt)
+        else:
+            similarity = 0.0
 
         chosen_obj = obj_qwen if _report_quality_score(obj_qwen) >= _report_quality_score(obj_alt) else obj_alt
         other_obj = obj_alt if chosen_obj is obj_qwen else obj_qwen
@@ -1053,6 +1197,7 @@ Report JSON:
                 "started_at": state.get("started_at"),
             }
         )
+        print("[Stage 4/4] Evaluator complete.")
         return {**state, "final_json": final_text}
 
     full_chain = (
@@ -1150,7 +1295,8 @@ def _report_similarity(a: dict | None, b: dict | None) -> float:
 
 def _report_quality_score(r: dict | None) -> float:
     """
-    Prefer reports with more 'Yes' validations and higher confidence.
+    Recall-first scoring: prefer reports that keep more findings (even if low confidence),
+    while still preferring higher-validated findings when available.
     """
     if not isinstance(r, dict):
         return 0.0
@@ -1169,7 +1315,9 @@ def _report_quality_score(r: dict | None) -> float:
         elif status:
             manual_count += 1
     avg_yes = (sum(yes_confs) / len(yes_confs)) if yes_confs else 0.0
-    return (len(yes_confs) * 0.10) + avg_yes - (manual_count * 0.02)
+    # Prefer more findings overall; don't penalize manual-check findings (user wants max capture).
+    total_count = len([f for f in findings if isinstance(f, dict)])
+    return (total_count * 0.02) + (len(yes_confs) * 0.06) + avg_yes + (manual_count * 0.005)
 
 
 def _overall_confidence_from_comparison(chosen: dict | None, other: dict | None, *, similarity: float) -> float:
@@ -1223,6 +1371,81 @@ def _prefer_non_empty_findings(final_json: str, draft_json: str | None) -> str:
     return final_json
 
 
+def _ensure_qwen_findings_in_final(final_json: str, qwen_draft_json: str | None) -> str:
+    """
+    Ensure the final report includes *at least* all findings that Qwen produced in Stage 3.
+
+    Rationale: we prefer to keep the evaluator's validated output, but never want to drop
+    potentially useful Qwen findings entirely. Any appended findings are marked as
+    "Requires manual check" with conservative confidence.
+    """
+    final_obj = _extract_json_object(final_json) or {}
+    qwen_obj = _extract_json_object(qwen_draft_json or "") or {}
+
+    final_findings = final_obj.get("findings")
+    qwen_findings = qwen_obj.get("findings")
+    if not isinstance(final_findings, list) or not isinstance(qwen_findings, list):
+        return final_json
+
+    def _key(f: dict) -> str:
+        fid = f.get("id")
+        if isinstance(fid, str) and fid.strip():
+            return fid.strip()
+        title = str(f.get("title") or "").strip().lower()
+        file_ = str(f.get("file") or f.get("path") or "").strip().lower()
+        line = f.get("line")
+        line_s = str(line) if isinstance(line, int) else ""
+        return f"t:{title}|f:{file_}|l:{line_s}"
+
+    existing: dict[str, dict] = {}
+    out: list[dict] = []
+    for f in final_findings:
+        if not isinstance(f, dict):
+            continue
+        k = _key(f)
+        if k in existing:
+            continue
+        existing[k] = f
+        out.append(f)
+
+    added = 0
+    for f in qwen_findings:
+        if not isinstance(f, dict):
+            continue
+        k = _key(f)
+        if k in existing:
+            continue
+        nf = dict(f)
+        nf["validation_status"] = "Requires manual check"
+        nf["validation_confidence"] = _clamp01(nf.get("validation_confidence"), default=0.65)
+        nf["validation_rationale"] = (
+            "Carried over from the Qwen analyzer draft to avoid dropping potential issues; not re-validated by the evaluator."
+        )
+        out.append(nf)
+        existing[k] = nf
+        added += 1
+
+    if added <= 0:
+        return final_json
+
+    summary = final_obj.get("summary")
+    if not isinstance(summary, dict):
+        summary = {"note": str(summary)} if summary is not None else {}
+    summary["total_findings"] = len(out)
+    # If we appended unvalidated findings, conservatively penalize the confidence score.
+    try:
+        cs = float(summary.get("confidence_score")) if summary.get("confidence_score") is not None else None
+    except Exception:
+        cs = None
+    if cs is not None:
+        total = max(1, len(out))
+        penalty = 0.50 * (added / total)
+        summary["confidence_score"] = _clamp01(cs * (1.0 - penalty), default=0.5)
+    final_obj["summary"] = summary
+    final_obj["findings"] = out
+    return json.dumps(final_obj, ensure_ascii=False)
+
+
 def _merge_findings_unique(primary_raw: str, secondary_raw: str, *, min_findings: int) -> str:
     """
     Merge findings from two report JSON strings, keeping stable order and deduping.
@@ -1271,8 +1494,8 @@ def _merge_findings_unique(primary_raw: str, secondary_raw: str, *, min_findings
 
 def _synthesize_report_if_too_few_findings(chain_out: dict, task: str, *, min_findings: int) -> str:
     """
-    After the four-stage chain, if there are too few findings, run one structured
-    Bedrock pass over repo map + plan + skills so the report isn't under-filled.
+    After the four-stage chain, if there are too few findings, run a recall-boost
+    tool-using pass to gather additional evidence-backed findings (not hallucinated).
     """
     merged = _prefer_non_empty_findings(
         chain_out.get("final_json", ""),
@@ -1282,31 +1505,65 @@ def _synthesize_report_if_too_few_findings(chain_out: dict, task: str, *, min_fi
         return merged
 
     print(
-        f"[Multi-stage] Only {_findings_count(merged)} finding(s); synthesis pass (repo map + plan + skills) to reach {min_findings}+..."
+        f"[Multi-stage] Only {_findings_count(merged)} finding(s); recall-boost pass to reach {min_findings}+..."
     )
-    repo_map = (chain_out.get("repo_map_json") or "")[:16000]
-    plan = (chain_out.get("analysis_plan_json") or "")[:16000]
-    skills = _read_skills_text(skills_dir)[:18000]
-    system = """You are a security analyst completing a static review deliverable. Output one JSON object only (no markdown fences).
+    existing = _extract_json_object(merged) or {}
+    existing_findings = existing.get("findings") if isinstance(existing.get("findings"), list) else []
+    existing_titles = []
+    for f in existing_findings:
+        if isinstance(f, dict):
+            t = f.get("title")
+            if isinstance(t, str) and t.strip():
+                existing_titles.append(t.strip())
+    existing_titles = existing_titles[:40]
 
-Required keys: "summary" (object), "findings" (array), "recommendations" (array, non-empty).
-The pipeline requires **at least MIN_FINDINGS** distinct findings. Each finding MUST have: id, title, severity, category, file, line (integer), code_snippet (short but concrete), description, impact, remediation, references (list).
+    repo_map = (chain_out.get("repo_map_json") or "")[:12000]
+    plan = (chain_out.get("analysis_plan_json") or "")[:12000]
 
-Ground every finding in **file paths that appear in the provided repo map** (or under those trees). Tie categories to OWASP 2021 or the skill themes. If exact line text is unknown, infer a plausible representative line for the named file and state any uncertainty briefly inside description — do not return an empty findings array."""
-    user = f"""Operator task:
+    boost_system = _costar_prompt(
+        role="Tool-using static security analyst (recall boost pass).",
+        context="You can use filesystem tools to grep and read code under the repo root.",
+        objective=f"Add more distinct, evidence-backed findings until there are at least {min_findings}.",
+        style="High-recall but evidence-driven: every finding must include a verbatim snippet and exact file path.",
+        tone="Direct and technical.",
+        audience="Security engineers and developers.",
+        response=(
+            'Output ONE JSON object only (no markdown) with keys: "summary", "findings", "recommendations".\n'
+            f'The output must contain at least {min_findings} distinct findings.'
+        ),
+        constraints=(
+            "- Only add findings that you can support with an exact `file` + `line` + verbatim `code_snippet` from a real file.\n"
+            "- Avoid duplicates of the existing findings (titles given in the user message).\n"
+            "- Prefer concrete vulnerability patterns in C: unsafe string/memory APIs, integer overflow, bounds checks, format strings,\n"
+            "  path traversal, symlink/TOCTOU, authZ checks, injection.\n"
+            "- Also check Python/web surfaces if present.\n"
+        ),
+    )
+    boost_user = f"""Operator task:
 {task}
 
-Repo map JSON (truncated if long):
+Repo map JSON (truncated):
 {repo_map}
 
-Analysis plan JSON (truncated):
+Plan JSON (truncated):
 {plan}
 
-Skills (truncated):
-{skills}
+Existing findings (avoid duplicates; titles):
+{json.dumps(existing_titles, ensure_ascii=False)}
+
+Instructions:
+- Focus on finding *additional* issues not already listed.
+- Use grep to find risky APIs and security-sensitive handlers, then read surrounding code to confirm.
 """
-    system = system.replace("MIN_FINDINGS", str(min_findings))
-    raw = _invoke_json_only(llm_analyzer, system, user)
+
+    boost_agent = create_deep_agent(
+        model=llm_analyzer,
+        tools=[],
+        backend=filesystem_backend,
+        system_prompt=boost_system,
+        skills=[skills_dir] if os.path.isdir(skills_dir) else [],
+    )
+    raw = _stream_final_content(boost_agent, boost_user)
     if _findings_count(raw) > 0:
         return _merge_findings_unique(merged, raw, min_findings=min_findings)
     return merged
@@ -1742,11 +1999,38 @@ def _to_markdown_report(raw_output: str, repo_url: str, repo_path: str, skills_d
         key=lambda f: (_severity_rank(f.get("severity")), str(f.get("id") or "")),
     )
 
+    # Always derive severity counts from findings so the markdown header can't show all zeros
+    # when findings exist (models often omit summary breakdown fields).
+    sev_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for f in findings_sorted:
+        sev = _norm_severity(f.get("severity")) or _classify_severity(f)
+        if sev in sev_counts:
+            sev_counts[sev] += 1
+
     total = summary.get("total_findings")
+    if total is None:
+        total = len(findings_sorted)
+
     critical = summary.get("critical")
     high = summary.get("high")
     medium = summary.get("medium")
     low = summary.get("low")
+
+    # If the breakdown is missing (or incorrectly all zeros) but we have findings, use derived counts.
+    try:
+        c0 = int(critical) if critical is not None else None
+        h0 = int(high) if high is not None else None
+        m0 = int(medium) if medium is not None else None
+        l0 = int(low) if low is not None else None
+    except Exception:
+        c0 = h0 = m0 = l0 = None
+    if findings_sorted and ((c0, h0, m0, l0) == (0, 0, 0, 0) or any(v is None for v in (c0, h0, m0, l0))):
+        critical, high, medium, low = (
+            sev_counts["Critical"],
+            sev_counts["High"],
+            sev_counts["Medium"],
+            sev_counts["Low"],
+        )
 
     app = summary.get("application") or "Unknown"
     assessment_type = summary.get("assessment_type") or "Static Analysis"
@@ -1763,11 +2047,11 @@ def _to_markdown_report(raw_output: str, repo_url: str, repo_path: str, skills_d
     md.append("## Executive summary")
     md.append("")
     md.append(
-        f"- **Findings**: {total if total is not None else len(findings_sorted)} "
-        f"(Critical: {critical if critical is not None else 0}, "
-        f"High: {high if high is not None else 0}, "
-        f"Medium: {medium if medium is not None else 0}, "
-        f"Low: {low if low is not None else 0})"
+        f"- **Findings**: {total} "
+        f"(Critical: {critical if critical is not None else sev_counts['Critical']}, "
+        f"High: {high if high is not None else sev_counts['High']}, "
+        f"Medium: {medium if medium is not None else sev_counts['Medium']}, "
+        f"Low: {low if low is not None else sev_counts['Low']})"
     )
     md.append("")
 
@@ -1779,7 +2063,7 @@ def _to_markdown_report(raw_output: str, repo_url: str, repo_path: str, skills_d
         for f in findings_sorted:
             fid = f.get("id") or "FINDING"
             title = f.get("title") or "Untitled finding"
-            severity = f.get("severity") or "Unspecified"
+            severity = _norm_severity(f.get("severity")) or _classify_severity(f)
             description = f.get("description")
 
             category = f.get("category") or f.get("owasp") or _infer_category(title, description)
@@ -1889,6 +2173,8 @@ def _terminal_safe_preview(text: str, max_chars: int = 4000) -> str:
 if __name__ == "__main__":
     print("DeepAgent SAST Demo")
     print("=" * 50)
+    print(f"[Models] Qwen: {bedrock_qwen_model_id}")
+    print(f"[Models] Alt analyzer: {bedrock_alt_analyzer_model_id}")
 
     run_id = os.getenv("RUN_ID", "").strip() or uuid.uuid4().hex[:12]
     started_at = _utc_now_iso()
@@ -1956,15 +2242,16 @@ Also look for web security issues (XSS, injection, unsafe deserialization), espe
             raw_final = out.get("final_json", "")
             draft_qwen = out.get("report_json_qwen", "")
             draft_alt = out.get("report_json_alt", "")
-            best_draft = draft_qwen if _findings_count(draft_qwen) >= _findings_count(draft_alt) else draft_alt
-            merged = _prefer_non_empty_findings(raw_final, best_draft)
+            # Prefer evaluator output, but never drop Qwen findings entirely.
+            merged = _prefer_non_empty_findings(raw_final, draft_qwen if draft_qwen else draft_alt)
+            merged = _ensure_qwen_findings_in_final(merged, draft_qwen)
             if merged != raw_final:
                 print(
                     "[Multi-stage] Evaluator returned no findings; using analyzer draft "
                     f"({_findings_count(merged)} finding(s))."
                 )
             result = _synthesize_report_if_too_few_findings(
-                {**out, "final_json": merged, "report_json": best_draft},
+                {**out, "final_json": merged, "report_json": draft_qwen or draft_alt},
                 analysis_task,
                 min_findings=MIN_FINDINGS,
             )
@@ -1983,12 +2270,18 @@ Also look for web security issues (XSS, injection, unsafe deserialization), espe
         )
         markdown_report = _to_markdown_report(result, repo_url=repo_url, repo_path=repo_path, skills_dir=skills_dir)
     except Exception as e:
+        msg = str(e)
+        if "end of its life" in msg.lower() or "resourcenotfoundexception" in msg.lower():
+            msg = (
+                msg
+                + f" | Check model ids: Qwen={bedrock_qwen_model_id}, Alt={bedrock_alt_analyzer_model_id}"
+            )
         _write_run_status(
             {
                 "state": "error",
                 "stage": "Error",
                 "progress": 100,
-                "message": str(e),
+                "message": msg,
                 "run_id": run_id,
                 "started_at": started_at,
                 "finished_at": _utc_now_iso(),
