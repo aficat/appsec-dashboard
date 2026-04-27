@@ -32,12 +32,6 @@ cp .env.example .env
 
 Then edit `.env` as needed (scripts call `dotenv.load_dotenv()` automatically; the repo ignores `.env` and `.venv/`).
 
-Recommended `.env` knobs:
-
-- **`BEDROCK_ALT_ANALYZER_MODEL_ID`**: set a fast non-Qwen alt model to keep Stage 3 quick (recommended: `amazon.nova-lite-v1:0`).
-- **`MIN_FINDINGS`**: minimum findings in the final report (default: `10`).
-- **`TARGET_FINDINGS`**: push the analyzer to aim higher than the minimum (example: `30`).
-
 Optional: run the dashboard UI:
 
 ```bash
@@ -137,6 +131,7 @@ The SAST demo also embeds the same scan into each report’s JSON/Markdown outpu
 - **Workflow status**: `GET /api/status` exposes live pipeline progress (backed by `run_status.json` written by the pipeline).
 - **Trigger a run from the UI**: the workflow panel includes a **Run scan** button that calls `POST /api/run` to start `deepagent_sast_demo.py` in the background.
   - Includes a **concurrency guard**: if a run is already in progress, the API returns HTTP 409.
+- **Stale runs**: if the background process dies while status still says `running`, the dashboard marks the run as `error` and includes recent log output to help diagnose the failure.
 - **View JSON**: the top-right “View JSON” button opens the latest normalized report JSON in a modal (fetched from `GET /api/report`).
 - **Run**:
 
@@ -189,6 +184,7 @@ The workflow runs a **four-stage LLM chain** (repo map → skills-based plan →
 - `security_reports/security_report_YYYYMMDD_HHMMSSZ.md` (one per scan)
 - `security_report.md` (latest)
 - `repo_map_cache.json` (optional; repo map cache for multi-stage runs)
+- `stage_cache.json` (optional; cached plan/analyzer/evaluator outputs to stabilize reruns)
 - Dashboard UI from `dashboard_app.py` (and `/api/report`)
 - Each report embeds a **Filetypes scanned** section derived from `tools/filetype_scan.py` and the full data is also included in the report’s **Raw JSON** under `filetype_scan`.
 
@@ -198,6 +194,7 @@ The workflow runs a **four-stage LLM chain** (repo map → skills-based plan →
 - **Streaming robustness**: DeepAgent stream events can deliver `messages` as a LangGraph `Overwrite(value=[...])` wrapper; the demo unwraps this in `_iter_stream_messages` to avoid runtime errors and dropped content.
 - Dashboard uses the embedded `## Raw JSON` as source-of-truth.
 - **Stable filetype reporting**: dashboard computes `included_files_total` and `ignored_files_total` from the report’s `filetype_scan.{included_counts,ignored_counts}` for consistent summary numbers.
+- **Deterministic file traversal**: `tools/filetype_scan.py` sorts `os.walk()` dirs/files, so the “example files” lists stop drifting between runs.
 - **Run-to-run stability**: the pipeline uses deterministic file indexing (sorted traversal) and can synthesize/merge results to reach `MIN_FINDINGS` so runs don’t under-fill.
 
 ## Notes
