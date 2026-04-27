@@ -13,9 +13,10 @@ import os
 import git
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from tools.filetype_scan import scan as filetype_scan
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -250,6 +251,7 @@ def _get_legacy_agent():
             backend=filesystem_backend,
             system_prompt=system_prompt,
             skills=[skills_dir] if os.path.isdir(skills_dir) else [],
+            debug=False,
         )
     return _legacy_agent
 
@@ -680,6 +682,7 @@ def run_multi_stage_chain() -> str:
             backend=filesystem_backend,
             system_prompt=repo_reader_prompt,
             skills=[],
+            debug=False,
         )
 
         repo_map_text = ""
@@ -896,6 +899,7 @@ def build_multi_stage_chain():
             backend=filesystem_backend,
             system_prompt=repo_reader_prompt,
             skills=[],
+            debug=False,
         )
 
         repo_map_text = ""
@@ -1041,6 +1045,7 @@ Each finding must still have a verbatim `code_snippet` from `read_file`/`grep` o
                 backend=filesystem_backend,
                 system_prompt=analysis_system,
                 skills=[skills_dir] if os.path.isdir(skills_dir) else [],
+                debug=False,
             )
             return (label, _stream_final_content(analysis_agent, analysis_user))
 
@@ -1051,14 +1056,37 @@ Each finding must still have a verbatim `code_snippet` from `read_file`/`grep` o
                 ex.submit(_run_one, "qwen", llm_analyzer): "qwen",
                 ex.submit(_run_one, "alt", llm_analyzer_alt): "alt",
             }
-            for fut in as_completed(futs):
-                label = futs[fut]
-                try:
-                    _label, txt = fut.result()
-                    reports[_label] = txt
-                except Exception as e:
-                    errors[label] = str(e)
-                    reports[label] = ""
+            pending = set(futs.keys())
+            started = time.time()
+            last_heartbeat = 0.0
+            while pending:
+                done, pending = wait(pending, timeout=15, return_when=FIRST_COMPLETED)
+
+                # Heartbeat: keep dashboard/status fresh during long analyzer runs.
+                now = time.time()
+                if (now - last_heartbeat) >= 30:
+                    elapsed_s = int(now - started)
+                    still = sorted({futs[f] for f in pending})
+                    _write_run_status(
+                        {
+                            "state": "running",
+                            "stage": "Analyzer (evidence gathering)",
+                            "progress": 60,
+                            "message": f"Collecting evidence and drafting findings… ({elapsed_s}s elapsed; waiting on: {', '.join(still) or 'none'})",
+                            "run_id": state.get("run_id"),
+                            "started_at": state.get("started_at"),
+                        }
+                    )
+                    last_heartbeat = now
+
+                for fut in done:
+                    label = futs[fut]
+                    try:
+                        _label, txt = fut.result()
+                        reports[_label] = txt
+                    except Exception as e:
+                        errors[label] = str(e)
+                        reports[label] = ""
 
         if errors and reports.get("qwen"):
             print(f"[Stage 3/4] Alt analyzer failed; continuing with Qwen only. ({errors.get('alt','')})")
@@ -1135,6 +1163,7 @@ Each finding must still have a verbatim `code_snippet` from `read_file`/`grep` o
                 backend=filesystem_backend,
                 system_prompt=judge_system,
                 skills=[],
+                debug=False,
             )
             judge_user = f"""Validate, correct, and de-hallucinate this report JSON. If needed, read files to verify.
 
@@ -1562,6 +1591,7 @@ Instructions:
         backend=filesystem_backend,
         system_prompt=boost_system,
         skills=[skills_dir] if os.path.isdir(skills_dir) else [],
+        debug=False,
     )
     raw = _stream_final_content(boost_agent, boost_user)
     if _findings_count(raw) > 0:

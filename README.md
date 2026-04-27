@@ -1,4 +1,4 @@
-# Group Project: AI‑Powered AppSec Analysis Workflow
+# AI‑Powered AppSec Analysis Workflow
 
 ## Background
 
