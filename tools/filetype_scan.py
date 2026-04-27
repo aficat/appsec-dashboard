@@ -108,8 +108,8 @@ def _infer_included_extensions(skill_names: Iterable[str]) -> set[str]:
 def _iter_repo_files(repo: Path, ignore_dirs: set[str]) -> Iterable[Path]:
     for root, dirs, files in os.walk(repo):
         # mutate dirs in-place to prune traversal
-        dirs[:] = [d for d in dirs if d not in ignore_dirs]
-        for f in files:
+        dirs[:] = sorted([d for d in dirs if d not in ignore_dirs])
+        for f in sorted(files):
             yield Path(root) / f
 
 

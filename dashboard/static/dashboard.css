@@ -242,6 +242,9 @@ code{font-family:var(--mono); font-size:.92em}
   justify-content:space-between;
   gap:12px;
 }
+.workflow__left{
+  width:100%;
+}
 .workflow__right{
   display:flex;
   align-items:center;
@@ -250,6 +253,9 @@ code{font-family:var(--mono); font-size:.92em}
 .workflow__runBtn{
   height:36px;
   padding:8px 12px;
+  width:auto;
+  min-width: 96px;
+  white-space: nowrap;
   box-shadow:none;
 }
 .workflow__runBtn[disabled]{
@@ -257,7 +263,7 @@ code{font-family:var(--mono); font-size:.92em}
   cursor:not-allowed;
 }
 .workflow__label{
-  font-size:12px;
+  font-size:14px;
   font-weight:800;
   letter-spacing:.12em;
   text-transform:uppercase;
@@ -307,6 +313,9 @@ code{font-family:var(--mono); font-size:.92em}
   border-radius:12px;
   padding:10px 10px;
   min-width:0;
+  display:flex;
+  flex-direction:column;
+  height:100%;
 }
 .workflowStep__top{
   display:flex;
@@ -351,6 +360,46 @@ code{font-family:var(--mono); font-size:.92em}
   overflow-wrap:anywhere;
   word-break:break-word;
 }
+.workflowStep__progress{
+  margin-top:auto;
+  padding-top:10px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.workflowStep__progressTop{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+}
+.workflowStep__progressPct{
+  font-size:11px;
+  font-weight:900;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--text), transparent 20%);
+}
+.workflowStep__bar{
+  height:8px;
+  border-radius:999px;
+  background: color-mix(in oklab, var(--text), transparent 92%);
+  overflow:hidden;
+}
+.workflowStep__barFill{
+  height:100%;
+  width:0%;
+  border-radius:999px;
+  background: linear-gradient(90deg, rgba(122,162,247,.85), rgba(115,209,61,.70));
+  transition: width .25s ease;
+}
+.workflowStep[data-status="pending"] .workflowStep__barFill{
+  background: linear-gradient(90deg, rgba(159,176,192,.35), rgba(159,176,192,.18));
+}
+.workflowStep[data-status="done"] .workflowStep__barFill{
+  background: linear-gradient(90deg, rgba(115,209,61,.82), rgba(115,209,61,.55));
+}
 .workflowStep__link{
   color: color-mix(in oklab, var(--accent), white 10%);
   text-decoration: underline;
@@ -379,6 +428,17 @@ code{font-family:var(--mono); font-size:.92em}
   border-color: rgba(122,162,247,.55);
   color: color-mix(in oklab, rgba(122,162,247,.95), var(--text) 18%);
   background: color-mix(in oklab, rgba(122,162,247,.12), var(--panelBg) 72%);
+}
+.workflowStep[data-status="failed"]{
+  border-color: rgba(255,77,79,.45);
+  background: color-mix(in oklab, rgba(255,77,79,.12), var(--panelBg) 72%);
+  box-shadow: none;
+  animation: none;
+}
+.workflowStep[data-status="failed"] .workflowStep__status{
+  border-color: rgba(255,77,79,.45);
+  color: color-mix(in oklab, rgba(255,77,79,.95), var(--text) 15%);
+  background: color-mix(in oklab, rgba(255,77,79,.10), var(--panelBg) 75%);
 }
 .workflowStep[data-status="pending"]{
   opacity:.78;
@@ -437,7 +497,8 @@ code{font-family:var(--mono); font-size:.92em}
   margin-right:6px;
 }
 .workflow[data-state="error"] .workflowStep[data-status="active"],
-.workflow[data-state="error"] .workflowStep[data-status="done"]{
+.workflow[data-state="error"] .workflowStep[data-status="done"],
+.workflow[data-state="error"] .workflowStep[data-status="failed"]{
   border-color: rgba(255,77,79,.45);
   background: color-mix(in oklab, rgba(255,77,79,.12), var(--panelBg) 72%);
 }
@@ -639,6 +700,53 @@ html[data-theme="dark"] header.topbar #viewJsonLink:hover{
 .row{cursor:pointer}
 .row:hover{background: var(--hoverRowBg)}
 .row--active{background: var(--activeRowBg)}
+
+/* Main table rows: left align + vertically centered cells */
+tr.row > td,
+tr.groupRow > td{
+  vertical-align: middle;
+  text-align: left;
+}
+
+/* Grouped findings (same/similar titles) */
+.groupRow{
+  cursor:pointer;
+}
+.groupRow:hover{
+  background: color-mix(in oklab, var(--hoverRowBg), transparent 20%);
+}
+.groupRow td.titleCell{
+  /* Keep table-cell layout so row heights align across columns */
+  display: table-cell;
+}
+.groupRow td.titleCell:empty::before{
+  content:"—";
+  color: var(--muted);
+  font-weight:700;
+}
+.groupRow td.titleCell .groupRow__title,
+.groupRow td.titleCell .groupRow__meta{
+  display:inline-block;
+  vertical-align:middle;
+  line-height:1.2;
+}
+.groupRow td.titleCell .groupRow__meta{
+  margin-left:8px;
+}
+.groupRow__title{
+  font-weight:800;
+}
+.groupRow__meta{
+  margin-left:8px;
+  font-size:12px;
+  font-weight:700;
+}
+.groupRow__loc{
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
 
 .titleCell{
   white-space:normal;

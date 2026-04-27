@@ -122,6 +122,14 @@
                 <code class="workflowStep__path">{{ meta.repo_path | default("repo") }}</code>
               {% endif %}
             </div>
+            <div class="workflowStep__progress" role="progressbar" aria-label="Stage 1 progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="workflowStep__progressTop">
+                <div class="workflowStep__progressPct" data-progress-pct>0%</div>
+              </div>
+              <div class="workflowStep__bar" aria-hidden="true">
+                <div class="workflowStep__barFill" data-progress-fill style="width:0%"></div>
+              </div>
+            </div>
           </div>
           <div class="workflowStep" data-step="plan" role="listitem">
             <div class="workflowStep__top">
@@ -137,6 +145,14 @@
                 <code class="workflowStep__path">skills/</code>
               {% endif %}
             </div>
+            <div class="workflowStep__progress" role="progressbar" aria-label="Stage 2 progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="workflowStep__progressTop">
+                <div class="workflowStep__progressPct" data-progress-pct>0%</div>
+              </div>
+              <div class="workflowStep__bar" aria-hidden="true">
+                <div class="workflowStep__barFill" data-progress-fill style="width:0%"></div>
+              </div>
+            </div>
           </div>
           <div class="workflowStep" data-step="analyze" role="listitem">
             <div class="workflowStep__top">
@@ -150,6 +166,14 @@
               vs
               <code>{{ (meta.models | default({})).alt | default("alt") }}</code>
             </div>
+            <div class="workflowStep__progress" role="progressbar" aria-label="Stage 3 progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="workflowStep__progressTop">
+                <div class="workflowStep__progressPct" data-progress-pct>0%</div>
+              </div>
+              <div class="workflowStep__bar" aria-hidden="true">
+                <div class="workflowStep__barFill" data-progress-fill style="width:0%"></div>
+              </div>
+            </div>
           </div>
           <div class="workflowStep" data-step="eval" role="listitem">
             <div class="workflowStep__top">
@@ -158,6 +182,14 @@
             </div>
             <div class="workflowStep__title">Evaluate</div>
             <div class="workflowStep__desc">{{ meta.report_filename | default("security_report.md") }}</div>
+            <div class="workflowStep__progress" role="progressbar" aria-label="Stage 4 progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div class="workflowStep__progressTop">
+                <div class="workflowStep__progressPct" data-progress-pct>0%</div>
+              </div>
+              <div class="workflowStep__bar" aria-hidden="true">
+                <div class="workflowStep__barFill" data-progress-fill style="width:0%"></div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="workflow__meta muted" id="workflowMeta"></div>

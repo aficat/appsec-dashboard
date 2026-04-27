@@ -18,6 +18,7 @@ ASSETS_DIR = os.path.join(SCRIPT_DIR, "dashboard")
 DEFAULT_REPORT_PATH = os.path.join(SCRIPT_DIR, "security_report.md")
 REPORTS_DIR = os.path.join(SCRIPT_DIR, "security_reports")
 RUN_STATUS_PATH = os.path.join(SCRIPT_DIR, "run_status.json")
+RUN_LOGS_DIR = os.path.join(SCRIPT_DIR, "run_logs")
 
 
 def _utc_now_iso() -> str:
@@ -57,7 +58,20 @@ def _latest_report_path() -> str:
                 if name.endswith(".md") and name.startswith("security_report_"):
                     candidates.append(os.path.join(REPORTS_DIR, name))
             if candidates:
-                return max(candidates, key=lambda p: os.path.getmtime(p))
+                # Prefer the report timestamp embedded in the filename (UTC) instead of mtime.
+                # mtime can be misleading when files are copied/edited/bulk-written.
+                def _ts_key(p: str) -> tuple[str, float, str]:
+                    base = os.path.basename(p)
+                    # security_report_YYYYMMDD_HHMMSSZ.md
+                    m = re.match(r"^security_report_(\d{8}_\d{6}Z)\.md$", base)
+                    ts = m.group(1) if m else ""
+                    try:
+                        mt = os.path.getmtime(p)
+                    except Exception:
+                        mt = 0.0
+                    return (ts, mt, base)
+
+                return max(candidates, key=_ts_key)
     except Exception:
         pass
     return DEFAULT_REPORT_PATH
@@ -78,6 +92,7 @@ def _load_run_status() -> dict[str, Any]:
         "stage": None,
         "progress": 0,
         "message": None,
+        "log_path": None,
         "updated_at": None,
         "started_at": None,
         "finished_at": None,
@@ -98,17 +113,233 @@ def _load_run_status() -> dict[str, Any]:
 
 def _extract_json_fence(markdown: str) -> dict[str, Any] | None:
     """
-    Extract the first ```json ... ``` fenced block as a JSON object.
+    Extract the first fenced ```json ... ``` (or longer backtick fence) block as a JSON object.
     Returns None if not found or not parseable.
     """
-    m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", markdown, flags=re.IGNORECASE)
+    # Support 3+ backticks and require the same fence to close (so embedded ``` in JSON strings won't truncate).
+    m = re.search(r"(`{3,})json\s*([\s\S]*?)\s*\1", markdown, flags=re.IGNORECASE)
     if not m:
         return None
     try:
-        obj = json.loads(m.group(1))
+        obj = json.loads(m.group(2))
         return obj if isinstance(obj, dict) else None
     except Exception:
         return None
+
+
+def _extract_markdown_findings(markdown: str) -> list[dict[str, Any]]:
+    """
+    Best-effort parser for reports that contain human-readable findings sections
+    (e.g. "### FINDING-001: ...") but an incomplete embedded JSON findings array.
+
+    We extract the core fields needed by the dashboard table:
+    id, title, severity, category, file, line, code_snippet, description, impact, remediation, references.
+    """
+
+    def _section_between(text: str, start_pat: str, end_pats: list[str]) -> str | None:
+        m = re.search(start_pat, text, flags=re.IGNORECASE | re.MULTILINE)
+        if not m:
+            return None
+        start = m.end()
+        end = len(text)
+        for ep in end_pats:
+            m2 = re.search(ep, text[start:], flags=re.IGNORECASE | re.MULTILINE)
+            if m2:
+                end = min(end, start + m2.start())
+        out = text[start:end].strip()
+        return out or None
+
+    findings: list[dict[str, Any]] = []
+    # Split by finding heading; keep the heading in each chunk.
+    parts = re.split(r"(?m)^(###\s+FINDING-\d+\s*:\s*.*)$", markdown)
+    if len(parts) < 2:
+        return findings
+
+    # parts = [pre, heading1, body1, heading2, body2, ...]
+    for i in range(1, len(parts) - 1, 2):
+        heading = parts[i].strip()
+        body = parts[i + 1] if (i + 1) < len(parts) else ""
+
+        hm = re.match(r"^###\s+(FINDING-\d+)\s*:\s*(.+)$", heading.strip())
+        if not hm:
+            continue
+        fid = hm.group(1).strip()
+        title = hm.group(2).strip()
+
+        def _match_field(pat: str) -> str | None:
+            m = re.search(pat, body, flags=re.IGNORECASE | re.MULTILINE)
+            if not m:
+                return None
+            v = (m.group(1) or "").strip()
+            return v or None
+
+        severity = _match_field(r"^- \*\*Severity\*\*:\s*(.+)\s*$")
+        category = _match_field(r"^- \*\*Category\*\*:\s*(.+)\s*$")
+        loc = _match_field(r"^- \*\*Location\*\*:\s*`([^`]+)`\s*$") or _match_field(
+            r"^- \*\*Location\*\*:\s*([^\s]+)\s*$"
+        )
+        file_path = ""
+        line_no: int | None = None
+        if loc:
+            # Expected: /path/to/file:123
+            mloc = re.match(r"^(.*?):(\d+)\s*$", loc.strip())
+            if mloc:
+                file_path = mloc.group(1).strip()
+                try:
+                    line_no = int(mloc.group(2))
+                except Exception:
+                    line_no = None
+            else:
+                file_path = loc.strip()
+
+        desc = _section_between(
+            body,
+            r"^\*\*Description\*\*\s*$",
+            [r"^\*\*Impact\*\*\s*$", r"^\*\*Evidence\*\*\s*$", r"^\*\*Remediation\*\*\s*$", r"^##\s+"],
+        )
+        impact = _section_between(
+            body,
+            r"^\*\*Impact\*\*\s*$",
+            [r"^\*\*Evidence\*\*\s*$", r"^\*\*Remediation\*\*\s*$", r"^\*\*References\*\*\s*$", r"^##\s+"],
+        )
+        remediation = _section_between(
+            body,
+            r"^\*\*Remediation\*\*\s*$",
+            [r"^\*\*References\*\*\s*$", r"^###\s+FINDING-", r"^##\s+"],
+        )
+
+        # Evidence: first fenced code block after "**Evidence**"
+        code_snippet = None
+        ev_block = _section_between(
+            body,
+            r"^\*\*Evidence\*\*\s*$",
+            [r"^\*\*Remediation\*\*\s*$", r"^\*\*References\*\*\s*$", r"^###\s+FINDING-", r"^##\s+"],
+        )
+        if ev_block:
+            mcode = re.search(r"```[\w-]*\s*([\s\S]*?)\s*```", ev_block)
+            if mcode:
+                code_snippet = (mcode.group(1) or "").strip() or None
+            else:
+                code_snippet = ev_block.strip() or None
+
+        # References: list items that look like URLs after "**References**"
+        refs: list[str] = []
+        refs_block = _section_between(body, r"^\*\*References\*\*\s*$", [r"^###\s+FINDING-", r"^##\s+"])
+        if refs_block:
+            for line in refs_block.splitlines():
+                mref = re.match(r"^\s*-\s*(https?://\S+)\s*$", line.strip())
+                if mref:
+                    refs.append(mref.group(1).strip())
+
+        findings.append(
+            {
+                "id": fid,
+                "title": title,
+                "severity": severity or "Unspecified",
+                "category": category or "",
+                "file": file_path,
+                "line": line_no,
+                "code_snippet": code_snippet,
+                "description": desc,
+                "impact": impact,
+                "remediation": remediation,
+                "references": refs,
+            }
+        )
+
+    return findings
+
+
+def _pad_findings_to_declared_counts(report: dict[str, Any]) -> dict[str, Any]:
+    """
+    Some saved markdown reports have a declared summary count (e.g. total_findings=20)
+    but an incomplete embedded findings array (e.g. only 9 objects). When the user
+    wants the dashboard to "follow the markdown", we pad with explicit placeholders
+    so the dashboard table + cards match the declared counts.
+    """
+    try:
+        if not isinstance(report, dict):
+            return report
+        summary = report.get("summary")
+        if not isinstance(summary, dict):
+            return report
+        findings = report.get("findings")
+        if not isinstance(findings, list):
+            findings = []
+
+        def _as_int0(v: object) -> int | None:
+            try:
+                if isinstance(v, bool):
+                    return None
+                if isinstance(v, (int, float)):
+                    return int(v)
+                if isinstance(v, str) and v.strip().isdigit():
+                    return int(v.strip())
+            except Exception:
+                return None
+            return None
+
+        declared_total = _as_int0(summary.get("total_findings"))
+        if declared_total is None or declared_total <= 0:
+            return report
+
+        have = len([f for f in findings if isinstance(f, dict)])
+        if have >= declared_total:
+            return report
+
+        # Declared breakdown we try to honor when padding.
+        declared = {
+            "Critical": _as_int0(summary.get("critical")) or 0,
+            "High": _as_int0(summary.get("high")) or 0,
+            "Medium": _as_int0(summary.get("medium")) or 0,
+            "Low": _as_int0(summary.get("low")) or 0,
+        }
+        current = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            sev = _normalize_severity_label(f.get("severity"))
+            if sev in current:
+                current[sev] += 1
+
+        def _next_sev() -> str:
+            # Fill remaining declared severities first; then default to Medium.
+            for sev in ["Critical", "High", "Medium", "Low"]:
+                if current[sev] < declared.get(sev, 0):
+                    current[sev] += 1
+                    return sev
+            current["Medium"] += 1
+            return "Medium"
+
+        missing_n = declared_total - have
+        out = list(findings)
+        for i in range(1, missing_n + 1):
+            sev = _next_sev()
+            out.append(
+                {
+                    "id": f"MISSING-{i:03d}",
+                    "title": "Finding present in summary but missing in body",
+                    "severity": sev,
+                    "category": "Report Integrity",
+                    "file": "—",
+                    "line": None,
+                    "code_snippet": None,
+                    "description": (
+                        "This placeholder exists because the report summary declares more findings than were "
+                        "included in the embedded findings list / markdown body."
+                    ),
+                    "impact": "Cannot assess; original finding content was not present in this report file.",
+                    "remediation": "Regenerate the report to include the full findings list.",
+                    "references": [],
+                    "validation_status": "Requires manual check",
+                    "validation_confidence": 0.5,
+                    "validation_rationale": "No original finding details available in this report artifact.",
+                }
+            )
+        report["findings"] = out
+        return report
+    except Exception:
+        return report
 
 
 def _severity_rank(sev: str | None) -> int:
@@ -240,6 +471,8 @@ def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
             or f.get("description")
         )
         title = str(raw_title).strip() if raw_title is not None else ""
+        if not title:
+            title = f"Untitled finding ({fid})"
         severity = _normalize_severity_label(f.get("severity") or "Unspecified")
         description = f.get("description")
 
@@ -266,6 +499,9 @@ def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
             or loc_obj.get("path")
             or ""
         )
+        file_str = str(file_).strip() if file_ is not None else ""
+        if not file_str:
+            file_str = "—"
         line = _as_int(f.get("line") or f.get("line_number") or f.get("lineno"))
         if line is None:
             line = _as_int(loc_obj.get("line"))
@@ -315,7 +551,7 @@ def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
                 title=title,
                 severity=severity,
                 category=category,
-                file=str(file_),
+                file=file_str,
                 line=line,
                 validation_status=validation_status,
                 validation_confidence=validation_confidence,
@@ -339,14 +575,59 @@ def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
         else:
             counts["other"] += 1
 
-    # Normalize counts based on the actual findings list.
-    # (Models sometimes emit stale/incorrect summary counters, so we recompute.)
+    # Compute a derived breakdown from the *displayed* findings list.
+    # Some reports also embed a "summary" section in the markdown with counts that
+    # may not match the embedded Raw JSON findings array (e.g. truncated findings).
+    # For the dashboard cards we prefer the report's declared summary when present,
+    # but we keep derived counts for transparency.
+    derived_total = len(normalized_findings)
+
+    def _as_int_summary(v: object) -> int | None:
+        try:
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, (int, float)):
+                return int(v)
+            if isinstance(v, str) and v.strip().isdigit():
+                return int(v.strip())
+        except Exception:
+            return None
+        return None
+
+    declared_total = _as_int_summary(summary.get("total_findings"))
+    declared_critical = _as_int_summary(summary.get("critical"))
+    declared_high = _as_int_summary(summary.get("high"))
+    declared_medium = _as_int_summary(summary.get("medium"))
+    declared_low = _as_int_summary(summary.get("low"))
+
     summary.setdefault("assessment_type", report.get("assessment_type", "Static Analysis"))
-    summary["total_findings"] = len(normalized_findings)
+    summary["derived_total_findings"] = derived_total
+    summary["derived_critical"] = counts["critical"]
+    summary["derived_high"] = counts["high"]
+    summary["derived_medium"] = counts["medium"]
+    summary["derived_low"] = counts["low"]
+
+    # Preserve what the report declared (if any), but keep the UI consistent by
+    # setting the displayed summary to match the findings list we actually show.
+    summary["declared_total_findings"] = declared_total
+    summary["declared_critical"] = declared_critical
+    summary["declared_high"] = declared_high
+    summary["declared_medium"] = declared_medium
+    summary["declared_low"] = declared_low
+
+    summary["total_findings"] = derived_total
     summary["critical"] = counts["critical"]
     summary["high"] = counts["high"]
     summary["medium"] = counts["medium"]
     summary["low"] = counts["low"]
+
+    if declared_total is not None and declared_total != derived_total:
+        note = str(summary.get("note") or "").strip()
+        mismatch = (
+            f"Note: report summary declares {declared_total} finding(s), "
+            f"but the parsed findings list contains {derived_total}."
+        )
+        summary["note"] = (note + ("\n" if note else "") + mismatch).strip()
 
     recommendations: list[str] = []
     if isinstance(raw_recs, list):
@@ -382,6 +663,20 @@ def _normalize_report(report: dict[str, Any]) -> dict[str, Any]:
 def _load_report(report_path: str) -> dict[str, Any]:
     md = _read_text(report_path)
     raw = _extract_json_fence(md) or {}
+    # If the report markdown contains more findings than the embedded JSON array,
+    # prefer the markdown-derived list so the dashboard table matches the report.
+    try:
+        md_findings = _extract_markdown_findings(md)
+        raw_findings = raw.get("findings") if isinstance(raw, dict) else None
+        raw_len = len(raw_findings) if isinstance(raw_findings, list) else 0
+        if md_findings and len(md_findings) > raw_len and isinstance(raw, dict):
+            raw["findings"] = md_findings
+    except Exception:
+        pass
+    # If the report's declared summary counts exceed the number of parsed findings,
+    # pad with explicit placeholders so the dashboard "follows the markdown".
+    if isinstance(raw, dict):
+        raw = _pad_findings_to_declared_counts(raw)
     return _normalize_report(raw)
 
 
@@ -405,6 +700,155 @@ def _safe_report_path(path: str) -> str | None:
 def _tokenize(text: str) -> set[str]:
     parts = re.split(r"[^a-zA-Z0-9_\-/\.]+", (text or "").lower())
     return {p for p in parts if p and len(p) >= 2}
+
+
+def _compact_ws(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _looks_like_finding_id(token: str) -> bool:
+    """
+    Finding IDs in this project are often slug-like (e.g. unsafe-string-function),
+    but sometimes appear as FINDING-001. Keep this permissive.
+    """
+    t = (token or "").strip()
+    if not t:
+        return False
+    if re.match(r"^finding-\d{3,}$", t, flags=re.IGNORECASE):
+        return True
+    return bool(re.match(r"^[a-z0-9][a-z0-9\-_]{2,}$", t, flags=re.IGNORECASE))
+
+
+def _extract_explicit_id(message: str, findings: list[dict[str, Any]]) -> str | None:
+    msg_l = (message or "").lower()
+    # Prefer exact ID mention from known IDs.
+    for f in findings:
+        fid = str(f.get("id") or "").strip()
+        if fid and fid.lower() in msg_l:
+            return fid
+    # Try a loose "for <id>" / "about <id>" capture as fallback.
+    m = re.search(r"(?:for|about|re)\s+([a-z0-9][a-z0-9\-_]{2,})\b", msg_l)
+    if m and _looks_like_finding_id(m.group(1)):
+        return m.group(1)
+    return None
+
+
+def _top_matches(message: str, findings: list[dict[str, Any]], *, limit: int = 5) -> list[tuple[int, dict[str, Any]]]:
+    q = _tokenize(message)
+    if not q:
+        return []
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for f in findings:
+        hay = " ".join(
+            str(x or "")
+            for x in [
+                f.get("id"),
+                f.get("title"),
+                f.get("severity"),
+                f.get("category"),
+                f.get("file"),
+                f.get("description"),
+                f.get("impact"),
+                f.get("remediation"),
+            ]
+        )
+        t = _tokenize(hay)
+        score = len(q & t)
+        if score > 0:
+            scored.append((score, f))
+    scored.sort(
+        key=lambda x: (
+            -x[0],
+            _severity_rank(str((x[1] or {}).get("severity"))),
+            str((x[1] or {}).get("id") or ""),
+        )
+    )
+    return scored[: max(1, int(limit))]
+
+
+def _normalize_sev_token(raw: str | None) -> str | None:
+    s = _compact_ws(str(raw or "")).lower()
+    if not s:
+        return None
+    if s in {"crit", "critical", "p0"}:
+        return "critical"
+    if s in {"hi", "high", "p1"}:
+        return "high"
+    if s in {"med", "medium", "moderate", "p2"}:
+        return "medium"
+    if s in {"lo", "low", "p3"}:
+        return "low"
+    return None
+
+
+def _filter_findings(findings: list[dict[str, Any]], *, severity: str | None = None) -> list[dict[str, Any]]:
+    if not severity:
+        return findings
+    sev_l = severity.strip().lower()
+    out: list[dict[str, Any]] = []
+    for f in findings:
+        s = str(f.get("severity") or "").strip().lower()
+        if s == sev_l:
+            out.append(f)
+    return out
+
+
+def _format_findings_list(findings: list[dict[str, Any]], *, limit: int = 30) -> str:
+    if not findings:
+        return "No findings in the current report."
+    lim = max(1, int(limit))
+    shown = findings[:lim]
+    out = [f"Findings ({len(findings)} total):"]
+    for f in shown:
+        out.append(_format_finding_brief(f))
+    if len(findings) > lim:
+        out.append("")
+        out.append(f"Showing first {lim}. Ask `list findings {lim + 20}` to show more.")
+    out.append("")
+    out.append("Ask: `explain <id>`, `evidence for <id>`, `impact for <id>`, or `remediation for <id>`.")
+    return "\n".join(out).strip()
+
+
+def _try_parse_limit(message: str) -> int | None:
+    msg_l = (message or "").lower()
+    m = re.search(r"\b(?:top|first|limit|show)\s+(\d{1,3})\b", msg_l)
+    if not m:
+        m = re.search(r"\b(\d{1,3})\b", msg_l)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+        if 1 <= n <= 200:
+            return n
+    except Exception:
+        return None
+    return None
+
+
+def _parse_aspect(message: str) -> str | None:
+    msg_l = (message or "").lower()
+    if any(k in msg_l for k in ["remediation", "mitigation", "fix", "patch", "resolve"]):
+        return "remediation"
+    if any(k in msg_l for k in ["evidence", "snippet", "code", "where in code", "location"]):
+        return "evidence"
+    if any(k in msg_l for k in ["impact", "risk", "consequence", "why bad", "severity rationale"]):
+        return "impact"
+    if any(k in msg_l for k in ["validate", "validation", "confidence", "true", "real vuln", "is it exploitable"]):
+        return "validation"
+    if any(k in msg_l for k in ["describe", "description", "what is this", "what does it mean", "explain", "details", "tell me more"]):
+        return "explain"
+    return None
+
+
+def _format_disambiguation(matches: list[tuple[int, dict[str, Any]]]) -> str:
+    out = ["I found multiple possible matches. Which finding do you mean? Reply with the ID:"]
+    for _, f in matches[:5]:
+        fid = f.get("id")
+        title = f.get("title") or "—"
+        sev = f.get("severity") or "Unspecified"
+        loc = f"{f.get('file') or '—'}" + (f":{f.get('line')}" if f.get("line") is not None else "")
+        out.append(f"- {fid} — {title} ({sev}) @ {loc}")
+    return "\n".join(out).strip()
 
 
 def _format_finding_brief(f: dict[str, Any]) -> str:
@@ -553,70 +997,147 @@ def _select_best_finding(message: str, findings: list[dict[str, Any]]) -> dict[s
     return best[1] if best else None
 
 
-def _answer_from_report(message: str, report: dict[str, Any]) -> dict[str, Any]:
+def _answer_from_report(message: str, report: dict[str, Any], *, context: dict[str, Any] | None = None) -> dict[str, Any]:
     msg = (message or "").strip()
     findings: list[dict[str, Any]] = report.get("findings") or []
 
     if not msg:
         return {
-            "answer": "Ask about a finding by ID (example: `unsafe-string-function`) or ask for 'list findings'.",
+            "answer": "Ask about a finding by ID (example: `explain unsafe-string-function`) or ask `list findings`.",
             "matched_finding_id": None,
         }
 
     msg_l = msg.lower()
-    if any(k in msg_l for k in ["list findings", "show findings", "what findings", "list all", "findings list"]):
-        if not findings:
-            return {"answer": "No findings in the current report.", "matched_finding_id": None}
-        out = ["Findings in this report:"]
-        for f in findings:
-            out.append(_format_finding_brief(f))
-        out.append("")
-        out.append("Ask: `explain <id>` or `remediation for <id>`.")
+    ctx_last_id = None
+    if isinstance(context, dict):
+        v = context.get("last_matched_finding_id")
+        if isinstance(v, str) and v.strip():
+            ctx_last_id = v.strip()
+
+    # Help / examples
+    if any(k in msg_l for k in ["help", "what can you do", "commands", "examples"]):
+        return {
+            "answer": "\n".join(
+                [
+                    "Try one of these:",
+                    "- `summary`",
+                    "- `recommendations`",
+                    "- `list findings`",
+                    "- `list critical findings`",
+                    "- `explain <id>`",
+                    "- `evidence for <id>`",
+                    "- `impact for <id>`",
+                    "- `remediation for <id>`",
+                    "",
+                    "Tip: you can ask follow-ups like `remediation?` after we’ve discussed a specific finding.",
+                ]
+            ).strip(),
+            "matched_finding_id": None,
+        }
+
+    # Summary / recommendations
+    if any(k in msg_l for k in ["summary", "overview", "high level", "high-level"]):
+        s = report.get("summary") or {}
+        if not isinstance(s, dict):
+            s = {}
+        total = s.get("total_findings")
+        critical = s.get("critical")
+        high = s.get("high")
+        medium = s.get("medium")
+        low = s.get("low")
+        note = s.get("note")
+        parts = []
+        parts.append("Report summary:")
+        parts.append(f"- Total findings: {total if total is not None else len(findings)}")
+        parts.append(f"- Critical/High/Medium/Low: {critical}/{high}/{medium}/{low}")
+        if note:
+            parts.append(f"- Note: {note}")
+        return {"answer": "\n".join(parts).strip(), "matched_finding_id": None}
+
+    if any(k in msg_l for k in ["recommendations", "recs", "what should we do", "next steps"]):
+        recs = report.get("recommendations") or []
+        if not isinstance(recs, list) or not recs:
+            return {"answer": "No recommendations provided in the report.", "matched_finding_id": None}
+        out = ["Recommendations:"]
+        for i, r in enumerate(recs[:20], start=1):
+            out.append(f"{i}. {r}")
+        if len(recs) > 20:
+            out.append("")
+            out.append(f"Showing first 20 of {len(recs)}.")
         return {"answer": "\n".join(out).strip(), "matched_finding_id": None}
 
-    f = _select_best_finding(msg, findings)
-    if not f:
-        sample = ", ".join([str(x.get("id")) for x in findings[:5] if isinstance(x, dict) and x.get("id")])
-        hint = f" Try: `list findings`." + (f" Known IDs include: {sample}" if sample else "")
-        return {"answer": "I couldn't match that question to a specific finding." + hint, "matched_finding_id": None}
+    # List findings (optionally by severity + optional limit)
+    if "findings" in msg_l and any(k in msg_l for k in ["list", "show", "what", "all", "display"]):
+        sev = None
+        if any(k in msg_l for k in ["critical", "high", "medium", "low", "p0", "p1", "p2", "p3"]):
+            sev = _normalize_sev_token(msg_l)
+        lim = _try_parse_limit(msg)
+        subset = _filter_findings(findings, severity=sev)
+        if sev:
+            subset = sorted(subset, key=lambda x: str(x.get("id") or ""))
+            header = f"{sev.capitalize()} findings"
+            return {
+                "answer": f"{header}:\n\n{_format_findings_list(subset, limit=lim or 30)}",
+                "matched_finding_id": None,
+            }
+        return {"answer": _format_findings_list(findings, limit=lim or 30), "matched_finding_id": None}
+
+    # Determine aspect + finding target (explicit id, fuzzy match, or conversation context).
+    aspect = _parse_aspect(msg)
+    explicit_id = _extract_explicit_id(msg, findings)
+
+    target: dict[str, Any] | None = None
+    if explicit_id:
+        for f in findings:
+            if str(f.get("id") or "").strip().lower() == explicit_id.lower():
+                target = f
+                break
+
+    if not target:
+        # If this is a follow-up aspect question and we have context, use it.
+        if aspect in {"remediation", "evidence", "impact", "validation", "explain"} and ctx_last_id:
+            for f in findings:
+                if str(f.get("id") or "").strip().lower() == ctx_last_id.lower():
+                    target = f
+                    break
+
+    if not target:
+        matches = _top_matches(msg, findings, limit=5)
+        if len(matches) >= 2 and matches[0][0] == matches[1][0]:
+            return {"answer": _format_disambiguation(matches), "matched_finding_id": None}
+        if matches:
+            target = matches[0][1]
+
+    if not target:
+        sample = ", ".join([str(x.get("id")) for x in findings[:6] if isinstance(x, dict) and x.get("id")])
+        hint = " Try: `list findings`."
+        if sample:
+            hint += f" Known IDs include: {sample}"
+        return {"answer": "I couldn’t match that to a specific finding." + hint, "matched_finding_id": None}
 
     # Intent: if user is vague ("more details" / "how to fix"), respond with the full actionable view.
-    if any(
-        k in msg_l
-        for k in [
-            "more detail",
-            "more details",
-            "tell me more",
-            "explain",
-            "how to fix",
-            "how do i fix",
-            "how to fit",  # common typo
-            "what is this",
-            "what does it mean",
-            "walk me through",
-        ]
-    ):
-        return {"answer": _format_actionable_answer(f), "matched_finding_id": f.get("id")}
+    if aspect == "explain":
+        return {"answer": _format_actionable_answer(target), "matched_finding_id": target.get("id")}
 
     # Narrow response if user asked a specific aspect.
-    if any(k in msg_l for k in ["remediation", "fix", "patch", "mitigation"]):
-        ans = _best_effort_fix_guidance(f)
-        return {"answer": f"{f.get('id')}: remediation\n\n{ans}", "matched_finding_id": f.get("id")}
-    if any(k in msg_l for k in ["impact", "risk", "why bad", "consequence"]):
-        ans = f.get("impact") or "No impact field provided for this finding."
-        return {"answer": f"{f.get('id')}: impact\n\n{ans}", "matched_finding_id": f.get("id")}
-    if any(k in msg_l for k in ["evidence", "snippet", "code", "where in code"]):
-        ans = f.get("code_snippet") or "No evidence/snippet field provided for this finding."
-        return {"answer": f"{f.get('id')}: evidence\n\n{ans}", "matched_finding_id": f.get("id")}
-    if any(k in msg_l for k in ["validate", "validation", "confidence", "true", "real vuln"]):
+    if aspect == "remediation":
+        ans = _best_effort_fix_guidance(target)
+        return {"answer": f"{target.get('id')}: remediation\n\n{ans}", "matched_finding_id": target.get("id")}
+    if aspect == "impact":
+        ans = target.get("impact") or "No impact field provided for this finding."
+        return {"answer": f"{target.get('id')}: impact\n\n{ans}", "matched_finding_id": target.get("id")}
+    if aspect == "evidence":
+        ans = target.get("code_snippet") or "No evidence/snippet field provided for this finding."
+        return {"answer": f"{target.get('id')}: evidence\n\n{ans}", "matched_finding_id": target.get("id")}
+    if aspect == "validation":
         ans = (
-            f"validation_status={f.get('validation_status')}, "
-            f"confidence={f.get('validation_confidence')}"
-            + (f"\n\nRationale: {f.get('validation_rationale')}" if f.get("validation_rationale") else "")
+            f"validation_status={target.get('validation_status')}, "
+            f"confidence={target.get('validation_confidence')}"
+            + (f"\n\nRationale: {target.get('validation_rationale')}" if target.get("validation_rationale") else "")
         )
-        return {"answer": f"{f.get('id')}: validation\n\n{ans}", "matched_finding_id": f.get("id")}
+        return {"answer": f"{target.get('id')}: validation\n\n{ans}", "matched_finding_id": target.get("id")}
 
-    return {"answer": _format_finding_detail(f), "matched_finding_id": f.get("id")}
+    return {"answer": _format_finding_detail(target), "matched_finding_id": target.get("id")}
 
 
 app = Flask(
@@ -718,7 +1239,8 @@ def api_chat():
     report = _load_report(report_path)
     payload = request.get_json(silent=True) or {}
     message = payload.get("message") if isinstance(payload, dict) else None
-    resp = _answer_from_report(str(message or ""), report)
+    ctx = payload.get("context") if isinstance(payload, dict) else None
+    resp = _answer_from_report(str(message or ""), report, context=ctx if isinstance(ctx, dict) else None)
     return jsonify(resp)
 
 
@@ -728,11 +1250,22 @@ def api_status():
     if st.get("state") == "running" and not _pid_is_alive(st.get("pid")):
         # Process died (or PID reused) but status never got reset → surface this as error so user can rerun.
         now = _utc_now_iso()
+        log_hint = ""
+        try:
+            lp = st.get("log_path")
+            if isinstance(lp, str) and lp and os.path.isfile(lp):
+                with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                    tail = f.read()[-4000:]
+                tail = tail.strip()
+                if tail:
+                    log_hint = "\n\nLast log output:\n" + tail
+        except Exception:
+            log_hint = ""
         st = {
             **st,
             "state": "error",
             "stage": st.get("stage") or "Unknown",
-            "message": "Pipeline process is no longer running (stale status). Please click 'Run scan' again.",
+            "message": "Pipeline process is no longer running (stale status). Please click 'Run scan' again." + log_hint,
             "finished_at": st.get("finished_at") or now,
             "updated_at": now,
         }
@@ -767,13 +1300,21 @@ def api_run():
     env["PYTHONPATH"] = add_pp if not existing_pp else add_pp + os.pathsep + existing_pp
 
     try:
+        os.makedirs(RUN_LOGS_DIR, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+        log_path = os.path.join(RUN_LOGS_DIR, f"run_{stamp}.log")
+        log_f = open(log_path, "a", encoding="utf-8")
         p = subprocess.Popen(
             [sys.executable, script_path],
             cwd=SCRIPT_DIR,
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=log_f,
         )
+        try:
+            log_f.close()
+        except Exception:
+            pass
     except Exception as e:
         return jsonify({"ok": False, "error": "spawn_failed", "message": str(e)}), 500
 
@@ -787,6 +1328,7 @@ def api_run():
                     "progress": 1,
                     "message": "Triggered from dashboard.",
                     "pid": p.pid,
+                    "log_path": log_path,
                 },
                 f,
                 ensure_ascii=False,

@@ -1,7 +1,10 @@
 (() => {
   const report = window.__REPORT__ || { findings: [], recommendations: [], summary: {} };
   const meta = window.__META__ || {};
-  const rows = Array.from(document.querySelectorAll("#findingsTable tbody tr.row"));
+  const findingById = new Map(
+    (Array.isArray(report && report.findings) ? report.findings : []).map((f) => [String((f && f.id) || ""), f])
+  );
+  let rows = [];
   const filters = document.getElementById("filters");
   const chatLog = document.getElementById("chatLog");
   const chatForm = document.getElementById("chatForm");
@@ -31,6 +34,144 @@
   const compareGrid = document.getElementById("compareGrid");
   const compareMeta = document.getElementById("compareMeta");
   let workflowPollTimer = null;
+
+  function normalizeTitleKey(s) {
+    return String(s || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getSeverityRank(sevRaw) {
+    const sev = String(sevRaw || "").toLowerCase();
+    if (sev === "critical") return 4;
+    if (sev === "high") return 3;
+    if (sev === "medium") return 2;
+    if (sev === "low") return 1;
+    return 0;
+  }
+
+  function titleCaseSeverity(sevRaw) {
+    const s = String(sevRaw || "").trim().toLowerCase();
+    if (!s) return "Other";
+    if (s === "critical") return "Critical";
+    if (s === "high") return "High";
+    if (s === "medium") return "Medium";
+    if (s === "low") return "Low";
+    return s.slice(0, 1).toUpperCase() + s.slice(1);
+  }
+
+  function groupFindingsBySimilarTitle() {
+    const tbody = document.querySelector("#findingsTable tbody");
+    if (!tbody) return { groups: new Map(), ungrouped: new Set() };
+
+    const allRows = Array.from(tbody.querySelectorAll("tr.row"));
+    const byKey = new Map();
+
+    allRows.forEach((r) => {
+      const titleCell = r.querySelector("td.titleCell");
+      const title = titleCell ? String(titleCell.textContent || "").trim() : "";
+      const key = normalizeTitleKey(title);
+      if (!key) return;
+      const arr = byKey.get(key) || [];
+      arr.push(r);
+      byKey.set(key, arr);
+      r.dataset.titleKey = key;
+    });
+
+    const groups = new Map();
+    const ungrouped = new Set(allRows);
+
+    byKey.forEach((members, key) => {
+      if (!Array.isArray(members) || members.length < 2) return;
+
+      // Create a group header row right before the first member row.
+      const first = members[0];
+      const firstTitleCell = first.querySelector("td.titleCell");
+      const titleText = firstTitleCell ? String(firstTitleCell.textContent || "").trim() : "Untitled";
+
+      let groupSev = "other";
+      let bestRank = -1;
+      members.forEach((m) => {
+        const r = getSeverityRank(m.getAttribute("data-sev") || "other");
+        if (r > bestRank) {
+          bestRank = r;
+          groupSev = String(m.getAttribute("data-sev") || "other");
+        }
+      });
+
+      const groupRow = document.createElement("tr");
+      groupRow.className = "groupRow";
+      groupRow.setAttribute("data-group-key", key);
+      groupRow.setAttribute("data-sev", groupSev);
+      groupRow.setAttribute("aria-expanded", "false");
+
+      const locations = members
+        .map((m) => {
+          const loc = m.querySelector("td.locCell code");
+          return loc ? String(loc.textContent || "").trim() : "";
+        })
+        .filter(Boolean);
+      const uniqueLocations = Array.from(new Set(locations));
+
+      const confVals = members
+        .map((m) => {
+          const id = String(m.getAttribute("data-id") || "");
+          const f = id ? findingById.get(id) : null;
+          return f && typeof f.validation_confidence === "number" ? f.validation_confidence : null;
+        })
+        .filter((n) => typeof n === "number");
+      const avgConf = confVals.length ? confVals.reduce((a, b) => a + b, 0) / confVals.length : null;
+
+      groupRow.innerHTML = `
+        <td>
+          <span class="sev sev--${esc(groupSev)}">${esc(titleCaseSeverity(groupSev))}</span>
+        </td>
+        <td class="titleCell" title="${esc(titleText)}">
+          <span class="groupRow__title">${esc(titleText)}</span>
+          <span class="groupRow__meta muted">(${members.length} findings)</span>
+        </td>
+        <td class="locCell">
+          <code class="groupRow__loc">${esc(uniqueLocations.slice(0, 2).join(" • "))}${uniqueLocations.length > 2 ? esc(` • +${uniqueLocations.length - 2} more`) : ""}</code>
+        </td>
+        <td>${avgConf == null ? `<span class="muted">—</span>` : `<code>${avgConf.toFixed(2)}</code>`}</td>
+      `.trim();
+
+      tbody.insertBefore(groupRow, first);
+
+      // Collapse members by default (but keep in DOM so per-finding detail still works).
+      members.forEach((m) => {
+        m.dataset.groupKey = key;
+        const detailRow = m.nextElementSibling;
+        m.style.display = "none";
+        if (detailRow && detailRow.classList.contains("detailRow")) {
+          detailRow.style.display = "none";
+          detailRow.hidden = true;
+          detailRow.dataset.groupKey = key;
+        }
+        ungrouped.delete(m);
+      });
+
+      groups.set(key, { key, groupRow, members });
+    });
+
+    return { groups, ungrouped };
+  }
+
+  // Build grouped view once on load.
+  const grouping = groupFindingsBySimilarTitle();
+  rows = Array.from(document.querySelectorAll("#findingsTable tbody tr.row"));
+
+  // Stabilize workflow step titles: some browser extensions / prior DOM mutations can
+  // accidentally append extra text nodes. Cache the template titles and re-apply them.
+  workflowSteps.forEach((el) => {
+    const titleEl = el.querySelector(".workflowStep__title");
+    if (!titleEl) return;
+    const base = String(titleEl.textContent || "").trim();
+    if (base) el.dataset.baseTitle = base;
+  });
 
   function getSystemTheme() {
     try {
@@ -108,7 +249,9 @@
   function applyFilter(sev) {
     const wanted = (sev || "all").toLowerCase();
     closeAllAccordions();
-    rows.forEach((r) => {
+
+    // Ungrouped: behave exactly as before.
+    grouping.ungrouped.forEach((r) => {
       const rowSev = (r.getAttribute("data-sev") || "other").toLowerCase();
       const show = wanted === "all" ? true : rowSev === wanted;
       r.style.display = show ? "" : "none";
@@ -118,11 +261,43 @@
         detailRow.hidden = true;
       }
     });
+
+    // Grouped: show group header if any member matches. Members only show when expanded.
+    grouping.groups.forEach((g) => {
+      const groupRow = g.groupRow;
+      const expanded = groupRow.getAttribute("aria-expanded") === "true";
+      const matchingMembers = g.members.filter((m) => {
+        const rowSev = (m.getAttribute("data-sev") || "other").toLowerCase();
+        return wanted === "all" ? true : rowSev === wanted;
+      });
+
+      const showGroup = matchingMembers.length > 0;
+      groupRow.style.display = showGroup ? "" : "none";
+
+      g.members.forEach((m) => {
+        const rowSev = (m.getAttribute("data-sev") || "other").toLowerCase();
+        const showMember = showGroup && expanded && (wanted === "all" ? true : rowSev === wanted);
+        m.style.display = showMember ? "" : "none";
+        const detailRow = m.nextElementSibling;
+        if (detailRow && detailRow.classList.contains("detailRow")) {
+          detailRow.style.display = showMember ? "" : "none";
+          detailRow.hidden = true;
+        }
+      });
+    });
   }
 
-  rows.forEach((r) => {
-    r.addEventListener("click", () => {
-      toggleAccordion(r);
+  rows.forEach((r) => r.addEventListener("click", () => toggleAccordion(r)));
+
+  grouping.groups.forEach((g) => {
+    g.groupRow.addEventListener("click", () => {
+      const open = g.groupRow.getAttribute("aria-expanded") === "true";
+      // Close per-finding accordions when toggling groups (avoids odd open states).
+      closeAllAccordions();
+      g.groupRow.setAttribute("aria-expanded", open ? "false" : "true");
+      // Re-apply current filter so the right members become visible.
+      const active = filters ? filters.querySelector("button.pill--active[data-sev]") : null;
+      applyFilter(active ? active.getAttribute("data-sev") : "all");
     });
   });
 
@@ -486,12 +661,43 @@
 
       const order = ["repo", "plan", "analyze", "eval"];
       const activeIdx = order.indexOf(active);
+
+      const stepRanges = {
+        repo: [0, 25],
+        plan: [25, 50],
+        analyze: [50, 85],
+        eval: [85, 100],
+      };
+
+      function clampPct(n) {
+        const v = typeof n === "number" ? n : 0;
+        return Math.max(0, Math.min(100, Math.round(v)));
+      }
+
+      function pctWithinRange(overall, start, end) {
+        const span = Math.max(1, end - start);
+        const t = (overall - start) / span;
+        return clampPct(t * 100);
+      }
+
       workflowSteps.forEach((el) => {
         const key = el.getAttribute("data-step");
         const idx = order.indexOf(key);
+
+        // Ensure title stays consistent and single-sourced from the template.
+        const baseTitle = (el.dataset && el.dataset.baseTitle) || "";
+        if (baseTitle) {
+          const titleEl = el.querySelector(".workflowStep__title");
+          if (titleEl) titleEl.textContent = baseTitle;
+        }
+
         let status = "pending";
         if (state === "done") status = "done";
-        else if (state === "error") status = idx <= activeIdx ? "active" : "pending";
+        else if (state === "error") {
+          if (idx < activeIdx) status = "done";
+          else if (idx === activeIdx) status = "failed";
+          else status = "pending";
+        }
         else if (idx < activeIdx) status = "done";
         else if (idx === activeIdx) status = "active";
         else status = "pending";
@@ -501,6 +707,8 @@
         if (badge) {
           if (status === "done") {
             badge.textContent = "Done";
+          } else if (status === "failed") {
+            badge.textContent = "Failed";
           } else if (status === "active") {
             badge.innerHTML =
               'Running <span class="workflowDots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>';
@@ -508,6 +716,41 @@
             badge.textContent = "Pending";
           }
         }
+
+        // Per-step progress: steps behind active are full, ahead are empty,
+        // active step uses the overall progress mapped onto its range.
+        let stepPct = 0;
+        if (state === "done") {
+          stepPct = 100;
+        } else if (idx < activeIdx) {
+          stepPct = 100;
+        } else if (idx > activeIdx) {
+          stepPct = 0;
+        } else {
+          const r = stepRanges[key] || [0, 100];
+          stepPct = pctWithinRange(pct, r[0], r[1]);
+          if (status === "active" && stepPct === 0 && state === "running") stepPct = 1;
+        }
+        stepPct = clampPct(stepPct);
+
+        const pb = el.querySelector(".workflowStep__progress");
+        if (pb) pb.setAttribute("aria-valuenow", String(stepPct));
+
+        const pctEl = el.querySelector("[data-progress-pct]");
+        if (pctEl) pctEl.textContent = `${stepPct}%`;
+        else if (pb && !pb.querySelector) {
+          // no-op: (defensive)
+        } else {
+          // Back-compat for older DOM where the progress container only contains text.
+          try {
+            if (pb && typeof pb.textContent === "string") pb.textContent = `${stepPct}%`;
+          } catch {
+            // ignore
+          }
+        }
+
+        const fill = el.querySelector("[data-progress-fill]");
+        if (fill) fill.style.width = `${stepPct}%`;
       });
 
       // Stop polling once the run is terminal.
@@ -613,7 +856,7 @@
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, context: { last_matched_finding_id: window.__CHAT_LAST_FINDING_ID__ || null } }),
     });
     if (!res.ok) {
       throw new Error(`chat request failed: ${res.status}`);
@@ -639,6 +882,11 @@
       const pending = chatLog ? chatLog.lastElementChild : null;
       try {
         const data = await sendChat(message);
+        try {
+          if (data && data.matched_finding_id) window.__CHAT_LAST_FINDING_ID__ = String(data.matched_finding_id);
+        } catch {
+          // ignore
+        }
         if (pending && pending.querySelector) {
           const body = pending.querySelector(".chatMsg__body");
           if (body) body.textContent = data.answer || "";

@@ -29,8 +29,8 @@ env/
 # Local outputs / generated artifacts
 repo_map_cache.json
 run_status.json
-security_report.md
-security_reports/
+run_logs/
+stage_cache.json
 
 # Cloned target repositories (default REPO_PATH)
 repo/
