@@ -631,6 +631,7 @@ def index():
     report_path = os.getenv("SECURITY_REPORT_PATH") or _latest_report_path()
     data = _load_report(report_path)
     repo_path = (os.getenv("REPO_PATH") or os.path.join(SCRIPT_DIR, "repo")).strip()
+    repo_url = os.getenv("REPO_URL", "https://github.com/haiwen/seafile.git").strip()
     skills_dir = (os.getenv("SKILLS_DIR") or os.path.join(SCRIPT_DIR, "skills")).strip()
     skills_list: list[str] = []
     try:
@@ -653,6 +654,7 @@ def index():
         "report_path": report_path,
         "report_filename": os.path.basename(report_path),
         "repo_path": repo_path,
+        "repo_url": repo_url or None,
         "skills_dir": skills_dir,
         "skills": skills_list,
         "models": {"qwen": qwen_model, "alt": alt_model},

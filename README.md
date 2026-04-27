@@ -158,25 +158,6 @@ The workflow runs a **four-stage LLM chain** (repo map → skills-based plan →
 | **#3 Analyzer (dual-flow)** | Two parallel tool‑using analyzer runs (Qwen + Alt) that gather evidence from `repo/` and output draft security report JSON (improves consistency via inter-model agreement). | **CO‑STAR**: tool-using evidence collector + report writer; response schema is Security Report JSON |
 | **#4 Evaluator + compare** | Qwen evaluator validates both drafts against the repo, then compares outputs to pick the better validated report and compute `summary.confidence_score` derived from inter-model agreement + per-finding validation confidence. | **CO‑STAR**: tool-using verifier/judge; response schema is corrected Security Report JSON |
 
-```mermaid
-flowchart LR
-  U[User / Runner Script\n`deepagent_sast_demo.py`] --> A[DeepAgent\n(LangChain/LangGraph agent)]
-  A -->|system prompt + skills| M[Bedrock Chat Model\n`ChatBedrockConverse`]
-  M --> A
-
-  A -->|tool calls| T[Filesystem tools\nls / glob / grep / read_file]
-  T --> A
-
-  A -->|final output| J[Structured JSON report\nsummary/findings/recommendations]
-
-  J --> P[Post-processor\nnormalize keys + infer category/location]
-  P --> R[`security_report.md`\n(markdown + embedded Raw JSON)]
-
-  R --> D[Dashboard\n`dashboard_app.py`]
-  D --> UI[Browser UI\ncards + table + details]
-  D --> API[`/api/report`\n(normalized JSON)]
-```
-
 ## Testing / evaluation
 
 - **Report & dashboard check**:

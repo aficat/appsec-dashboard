@@ -115,7 +115,12 @@
             </div>
             <div class="workflowStep__title">Repo reader</div>
             <div class="workflowStep__desc">
-              Repo: <code class="workflowStep__path">{{ meta.repo_path | default("repo") }}</code>
+              Repo:
+              {% if meta.repo_url %}
+                <a class="workflowStep__link" href="{{ meta.repo_url }}" target="_blank" rel="noopener noreferrer">{{ meta.repo_url }}</a>
+              {% else %}
+                <code class="workflowStep__path">{{ meta.repo_path | default("repo") }}</code>
+              {% endif %}
             </div>
           </div>
           <div class="workflowStep" data-step="plan" role="listitem">
@@ -125,8 +130,12 @@
             </div>
             <div class="workflowStep__title">Plan</div>
             <div class="workflowStep__desc">
-              Skills: <code class="workflowStep__path">{{ meta.skills_dir | default("skills") }}</code>
-              {% if meta.skills %}({{ meta.skills | join(", ") }}){% endif %}
+              Skills:
+              {% if meta.skills %}
+                {{ meta.skills | join(", ") }}
+              {% else %}
+                <code class="workflowStep__path">skills/</code>
+              {% endif %}
             </div>
           </div>
           <div class="workflowStep" data-step="analyze" role="listitem">
@@ -152,6 +161,7 @@
           </div>
         </div>
         <div class="workflow__meta muted" id="workflowMeta"></div>
+        <div class="workflow__error" id="workflowError" hidden></div>
       </section>
 
       <section class="cards">

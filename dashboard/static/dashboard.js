@@ -19,6 +19,7 @@
   const workflowStatus = document.getElementById("workflowStatus");
   const workflowPct = document.getElementById("workflowPct");
   const workflowMeta = document.getElementById("workflowMeta");
+  const workflowError = document.getElementById("workflowError");
   const workflowSteps = workflowStatus ? Array.from(workflowStatus.querySelectorAll(".workflowStep")) : [];
   const runPipelineBtn = document.getElementById("runPipelineBtn");
   const stopPipelineBtn = document.getElementById("stopPipelineBtn");
@@ -453,6 +454,16 @@
       if (started) metaParts.push(`Started: ${started}`);
       if (updated) metaParts.push(`Updated: ${updated}`);
       if (workflowMeta) workflowMeta.textContent = metaParts.join(" • ");
+
+      if (workflowError) {
+        if (state === "error") {
+          workflowError.hidden = false;
+          workflowError.textContent = msg || "Pipeline failed. See terminal output for details.";
+        } else {
+          workflowError.hidden = true;
+          workflowError.textContent = "";
+        }
+      }
 
       if (runPipelineBtn) {
         const running = state === "running";
