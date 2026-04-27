@@ -2,7 +2,7 @@
 
 ## Background
 
-This folder implements a repeatable **AI-powered AppSec workflow**: analyze an open-source repo with **DeepAgent**, **skills**, and Bedrock, generate a structured report, and present results as **Markdown** and a **dashboard**. By default `deepagent_sast_demo.py` runs the **four-stage chain** (repo reader → skill plan → analyzer → evaluator); a lightweight **fast skill scan** is optional.
+This is an **AI-powered AppSec workflow**: analyze an open-source repo with **DeepAgent**, **skills**, and Bedrock, generate a structured report, and present results as **Markdown** and a **dashboard**. By default `deepagent_sast_demo.py` runs the **four-stage chain** (repo reader → skill plan → analyzer → evaluator); a lightweight **fast skill scan** is optional.
 
 - **Default target repo**: [haiwen/seafile](https://github.com/haiwen/seafile) (C-heavy with some Python)
 - **Default clone location**: `repo/`
