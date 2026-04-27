@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Security Report Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar__title">
+        <div class="topbar__kicker">AppSec Project</div>
+        <h1>Security Report Dashboard</h1>
+        <div class="topbar__meta">
+          {% if data.summary.note %}
+            <div class="muted">{{ data.summary.note }}</div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="topbar__actions">
+        <button
+          type="button"
+          class="button button--ghost"
+          id="themeToggle"
+          aria-label="Switch theme"
+          aria-pressed="false"
+          title="Switch theme"
+        >
+          <span class="themeIcon themeIcon--sun" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2"></path>
+              <path d="M12 20v2"></path>
+              <path d="M4.93 4.93l1.41 1.41"></path>
+              <path d="M17.66 17.66l1.41 1.41"></path>
+              <path d="M2 12h2"></path>
+              <path d="M20 12h2"></path>
+              <path d="M4.93 19.07l1.41-1.41"></path>
+              <path d="M17.66 6.34l1.41-1.41"></path>
+            </svg>
+          </span>
+          <span class="themeIcon themeIcon--moon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3a7.5 7.5 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+            </svg>
+          </span>
+          <span class="visually-hidden" id="themeToggleText">Switch theme</span>
+        </button>
+        <button
+          type="button"
+          class="button button--ghost button--icon"
+          id="refreshDashboardBtn"
+          title="Refresh dashboard"
+          aria-label="Refresh dashboard"
+        >
+          <span aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+              <path d="M21 3v6h-6"></path>
+            </svg>
+          </span>
+          <span class="visually-hidden">Refresh</span>
+        </button>
+        <button
+          type="button"
+          class="button button--ghost button--icon"
+          id="viewJsonLink"
+          title="View JSON"
+          aria-label="View JSON"
+        >
+          <span aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 10h.01"></path>
+              <path d="M15 10h.01"></path>
+              <path d="M9 14h.01"></path>
+              <path d="M15 14h.01"></path>
+              <path d="M8 21h8a2 2 0 0 0 2-2V7l-4-4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2Z"></path>
+              <path d="M14 3v4a2 2 0 0 0 2 2h4"></path>
+            </svg>
+          </span>
+          <span class="visually-hidden">View JSON</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="workflow" aria-label="LLM workflow status" id="workflowStatus" hidden>
+        <div class="workflow__row">
+          <div class="workflow__left">
+            <div class="workflow__label">LLM workflow</div>
+          </div>
+          <div class="workflow__right">
+            <button type="button" class="button button--ghost workflow__runBtn" id="runPipelineBtn">
+              Run scan
+            </button>
+            <button
+              type="button"
+              class="button button--ghost workflow__stopBtn"
+              id="stopPipelineBtn"
+              title="Stop current scan"
+              aria-label="Stop current scan"
+              disabled
+            >
+              Stop
+            </button>
+            <div class="workflow__pct" id="workflowPct">0%</div>
+          </div>
+        </div>
+
+        <div class="workflow__steps" role="list" aria-label="Workflow stages">
+          <div class="workflowStep" data-step="repo" role="listitem">
+            <div class="workflowStep__top">
+              <div class="workflowStep__kicker">Stage 1</div>
+              <div class="workflowStep__status" aria-hidden="true"></div>
+            </div>
+            <div class="workflowStep__title">Repo reader</div>
+            <div class="workflowStep__desc">
+              Repo: <code class="workflowStep__path">{{ meta.repo_path | default("repo") }}</code>
+            </div>
+          </div>
+          <div class="workflowStep" data-step="plan" role="listitem">
+            <div class="workflowStep__top">
+              <div class="workflowStep__kicker">Stage 2</div>
+              <div class="workflowStep__status" aria-hidden="true"></div>
+            </div>
+            <div class="workflowStep__title">Plan</div>
+            <div class="workflowStep__desc">
+              Skills: <code class="workflowStep__path">{{ meta.skills_dir | default("skills") }}</code>
+              {% if meta.skills %}({{ meta.skills | join(", ") }}){% endif %}
+            </div>
+          </div>
+          <div class="workflowStep" data-step="analyze" role="listitem">
+            <div class="workflowStep__top">
+              <div class="workflowStep__kicker">Stage 3</div>
+              <div class="workflowStep__status" aria-hidden="true"></div>
+            </div>
+            <div class="workflowStep__title">Analyze</div>
+            <div class="workflowStep__desc">
+              Models used:
+              <code>{{ (meta.models | default({})).qwen | default("qwen") }}</code>
+              vs
+              <code>{{ (meta.models | default({})).alt | default("alt") }}</code>
+            </div>
+          </div>
+          <div class="workflowStep" data-step="eval" role="listitem">
+            <div class="workflowStep__top">
+              <div class="workflowStep__kicker">Stage 4</div>
+              <div class="workflowStep__status" aria-hidden="true"></div>
+            </div>
+            <div class="workflowStep__title">Evaluate</div>
+            <div class="workflowStep__desc">{{ meta.report_filename | default("security_report.md") }}</div>
+          </div>
+        </div>
+        <div class="workflow__meta muted" id="workflowMeta"></div>
+      </section>
+
+      <section class="cards">
+        <div class="card">
+          <div class="card__label">Total</div>
+          <div class="card__value">{{ data.summary.total_findings }}</div>
+        </div>
+        <div class="card card--critical">
+          <div class="card__label">Critical</div>
+          <div class="card__value">{{ data.summary.critical }}</div>
+        </div>
+        <div class="card card--high">
+          <div class="card__label">High</div>
+          <div class="card__value">{{ data.summary.high }}</div>
+        </div>
+        <div class="card card--medium">
+          <div class="card__label">Medium</div>
+          <div class="card__value">{{ data.summary.medium }}</div>
+        </div>
+        <div class="card card--low">
+          <div class="card__label">Low</div>
+          <div class="card__value">{{ data.summary.low }}</div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="panel__header">
+            <h2>Findings</h2>
+            <div class="filters" id="filters">
+              <button class="pill pill--active" data-sev="all">All</button>
+              <button class="pill" data-sev="critical">Critical</button>
+              <button class="pill" data-sev="high">High</button>
+              <button class="pill" data-sev="medium">Medium</button>
+              <button class="pill" data-sev="low">Low</button>
+            </div>
+            <div class="panel__actions">
+              <button
+                type="button"
+                class="button button--ghost"
+                id="compareReportsBtn"
+                title="Compare with previous report"
+                aria-label="Compare with previous report"
+              >
+                Compare with previous report
+              </button>
+            </div>
+          </div>
+
+          <div class="tableWrap">
+            <table class="table" id="findingsTable">
+              <thead>
+                <tr>
+                  <th style="width: 120px">Severity</th>
+                  <th>Title</th>
+                  <th style="width: 320px">Location</th>
+                  <th style="width: 120px">Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for f in data.findings %}
+                  <tr class="row" data-sev="{{ (f.severity or 'unspecified') | lower }}" data-id="{{ f.id }}" aria-expanded="false">
+                    <td>
+                      <span class="sev sev--{{ (f.severity or 'other') | lower }}">{{ f.severity }}</span>
+                    </td>
+                    <td class="titleCell" title="{{ f.title }}">{{ f.title if f.title else "—" }}</td>
+                    <td class="locCell">
+                      <code title="{{ f.file }}{% if f.line is not none %}:{{ f.line }}{% endif %}">
+                        {{ f.file if f.file else "—" }}{% if f.file and f.line is not none %}:{{ f.line }}{% endif %}
+                      </code>
+                    </td>
+                    <td>
+                      <code>
+                        {{ (f.validation_confidence | default(0.5)) | round(2) }}
+                      </code>
+                    </td>
+                  </tr>
+                  <tr class="detailRow" data-detail-for="{{ f.id }}" hidden>
+                    <td colspan="4">
+                      <div class="detailInline">
+                        <div class="kv">
+                          <div class="k">ID</div>
+                          <div class="v"><code>{{ f.id }}</code></div>
+                        </div>
+                        <div class="kv">
+                          <div class="k">Severity</div>
+                          <div class="v"><span class="sev sev--{{ (f.severity or 'other') | lower }}">{{ f.severity if f.severity else "Unspecified" }}</span></div>
+                        </div>
+                        <div class="kv">
+                          <div class="k">Validation</div>
+                          <div class="v">
+                            <code>
+                              {% set vs = (f.validation_status or "") | string %}
+                              {% set vsl = vs | lower %}
+                              {% if vsl in ["yes", "y", "true", "confirmed"] %}
+                                Yes
+                              {% elif vsl in ["requires_manual_check", "requires manual check", "manual_check", "needs_manual_check", "needs manual review", "unknown", "unclear", "no", "false", ""] %}
+                                Requires manual check
+                              {% else %}
+                                Requires manual check
+                              {% endif %}
+                            </code>
+                          </div>
+                        </div>
+                        <div class="kv">
+                          <div class="k">Confidence</div>
+                          <div class="v"><code>{{ (f.validation_confidence | default(0.5)) | round(2) }}</code></div>
+                        </div>
+                        {% if f.validation_rationale %}
+                          <div class="kv">
+                            <div class="k">Validation rationale</div>
+                            <div class="v">{{ f.validation_rationale }}</div>
+                          </div>
+                        {% endif %}
+                        <div class="kv">
+                          <div class="k">Category</div>
+                          <div class="v">{{ f.category if f.category else "Uncategorized" }}</div>
+                        </div>
+                        <div class="kv">
+                          <div class="k">Location</div>
+                          <div class="v"><code>{{ f.file if f.file else "—" }}{% if f.file and f.line is not none %}:{{ f.line }}{% endif %}</code></div>
+                        </div>
+                        <div class="kv">
+                          <div class="k">Title</div>
+                          <div class="v">{{ f.title if f.title else "—" }}</div>
+                        </div>
+
+                        {% if f.description %}
+                          <div class="kv">
+                            <div class="k">Description</div>
+                            <div class="v">{{ f.description }}</div>
+                          </div>
+                        {% endif %}
+
+                        {% if f.impact %}
+                          <div class="kv">
+                            <div class="k">Impact</div>
+                            <div class="v">{{ f.impact }}</div>
+                          </div>
+                        {% endif %}
+
+                        {% if f.code_snippet %}
+                          <div class="kv">
+                            <div class="k">Evidence</div>
+                            <div class="v"><div class="pre">{{ f.code_snippet }}</div></div>
+                          </div>
+                        {% endif %}
+
+                        {% if f.remediation %}
+                          <div class="kv">
+                            <div class="k">Remediation</div>
+                            <div class="v">{{ f.remediation }}</div>
+                          </div>
+                        {% endif %}
+
+                        {% if f.references and f.references|length > 0 %}
+                          <div class="kv">
+                            <div class="k">References</div>
+                            <div class="v">
+                              {% for r in f.references %}
+                                <div><a href="{{ r }}" target="_blank" rel="noreferrer">{{ r }}</a></div>
+                              {% endfor %}
+                            </div>
+                          </div>
+                        {% endif %}
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__header">
+          <h2>Recommendations</h2>
+        </div>
+        {% if data.recommendations and data.recommendations|length > 0 %}
+          <ol class="recs">
+            {% for r in data.recommendations %}
+              <li>{{ r }}</li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          <div class="muted">No recommendations provided.</div>
+        {% endif %}
+      </section>
+
+      <div class="chatWidget" id="chatWidget" data-open="false">
+        <button
+          type="button"
+          class="button button--ghost button--icon chatWidget__toggle"
+          id="chatToggle"
+          aria-controls="chatPanel"
+          aria-expanded="false"
+          title="Open report assistant"
+          aria-label="Open report assistant"
+        >
+          <span aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path>
+            </svg>
+          </span>
+          <span class="visually-hidden">Report assistant</span>
+        </button>
+
+        <section class="panel chatPanel chatWidget__panel" id="chatPanel" aria-label="Report assistant">
+          <div class="panel__header">
+            <h2>Report assistant</h2>
+            <button
+              type="button"
+              class="button button--ghost button--icon chatWidget__close"
+              id="chatClose"
+              aria-label="Close report assistant"
+              title="Close"
+            >
+              <span aria-hidden="true" style="font-size:16px;line-height:1">×</span>
+            </button>
+          </div>
+
+          <div class="chat" id="chat">
+            <div class="chat__log" id="chatLog" aria-live="polite"></div>
+            <form class="chat__composer" id="chatForm">
+              <input
+                class="chat__input"
+                id="chatInput"
+                name="message"
+                placeholder="Try: list findings • explain unsafe-string-function • remediation for buffer-overflow-risk"
+                autocomplete="off"
+              />
+              <button type="submit" class="button chat__send">Send</button>
+            </form>
+          </div>
+        </section>
+      </div>
+
+      {% if data.filetype_scan %}
+        <section class="panel">
+          <div class="panel__header">
+            <h2>Filetypes scanned</h2>
+          </div>
+
+          <div class="filetype-summary">
+            <p class="filetype-summary__line">
+              <strong>{{ data.filetype_scan.included_files_total | default(0) }}</strong>
+              <span class="muted">files</span> included in scan scope
+              <span class="filetype-summary__sep">·</span>
+              <strong>{{ data.filetype_scan.ignored_files_total | default(0) }}</strong>
+              <span class="muted">files</span> excluded from scan scope
+            </p>
+            <button
+              type="button"
+              class="breakdown-btn"
+              id="filetypeInfoBtn"
+              aria-expanded="false"
+              aria-controls="filetypeBreakdown"
+              title="View breakdown"
+            >
+              View breakdown
+            </button>
+          </div>
+
+          <div id="filetypeBreakdown" class="filetype-breakdown" hidden>
+            <div class="filetype-cols">
+              <div class="kv">
+                <div class="k">Included</div>
+                <div class="v">
+                  {% if data.filetype_scan.included_counts %}
+                    {% for ext, count in data.filetype_scan.included_counts.items() %}
+                      <div><code>{{ ext }}</code> — {{ count }}</div>
+                    {% endfor %}
+                  {% else %}
+                    <div class="muted">No allowlist inferred (treating as all file types).</div>
+                  {% endif %}
+                </div>
+              </div>
+
+              <div class="kv">
+                <div class="k">Ignored</div>
+                <div class="v">
+                  {% if data.filetype_scan.ignored_counts %}
+                    {% for ext, count in data.filetype_scan.ignored_counts.items() %}
+                      <div><code>{{ ext }}</code> — {{ count }}</div>
+                    {% endfor %}
+                  {% else %}
+                    <div class="muted">None (based on current inferred allowlist).</div>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      {% endif %}
+    </main>
+
+    <div class="modal" id="compareModal" hidden>
+      <div class="modal__overlay" data-close="true"></div>
+      <div class="modal__panel" role="dialog" aria-modal="true" aria-label="Compare reports">
+        <div class="modal__header">
+          <div class="modal__title">Compare findings</div>
+          <button type="button" class="button button--ghost button--icon" id="compareCloseBtn" title="Close" aria-label="Close compare">
+            <span aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6 6 18"></path>
+                <path d="M6 6l12 12"></path>
+              </svg>
+            </span>
+            <span class="visually-hidden">Close</span>
+          </button>
+        </div>
+        <div class="modal__body">
+          <div class="compareBar">
+            <div class="compareBar__left">
+              <div class="compareBar__label muted">Previous report</div>
+              <select id="comparePrevSelect" class="select">
+                <option value="">Loading…</option>
+              </select>
+            </div>
+            <div class="compareBar__right">
+              <button type="button" class="button button--ghost" id="compareRunBtn">Compare</button>
+            </div>
+          </div>
+          <div class="compareMeta muted" id="compareMeta"></div>
+          <div class="compareGrid" id="compareGrid"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="jsonModal" hidden>
+      <div class="modal__overlay" data-close="true"></div>
+      <div class="modal__panel" role="dialog" aria-modal="true" aria-label="Report JSON">
+        <div class="modal__header">
+          <div class="modal__title">Report JSON</div>
+          <div class="panel__actions">
+            <button type="button" class="button button--ghost" id="jsonCopyBtn" title="Copy JSON" aria-label="Copy JSON">
+              Copy
+            </button>
+            <button type="button" class="button button--ghost button--icon" id="jsonCloseBtn" title="Close" aria-label="Close JSON modal">
+              <span aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 6 6 18"></path>
+                  <path d="M6 6l12 12"></path>
+                </svg>
+              </span>
+              <span class="visually-hidden">Close</span>
+            </button>
+          </div>
+        </div>
+        <div class="modal__body">
+          <pre class="pre jsonModal__pre" id="jsonModalPre"></pre>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      window.__REPORT__ = {{ data | tojson }};
+      window.__META__ = { report_path: {{ (meta.report_path | default("")) | tojson }} };
+    </script>
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  </body>
+</html>
+
